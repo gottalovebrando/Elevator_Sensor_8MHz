@@ -14,7 +14,7 @@
 //*******************************************END general libraries******************************************************
 
 //*******************************************for IMU******************************************************
-//#include <Wire.h> //I2C used by MPU6050
+// #include <Wire.h> //I2C used by MPU6050
 #include <MPU6050.h>
 // imu global variable
 //  AD0 pin low = use address 0x68 (default for InvenSense evaluation board)
@@ -28,21 +28,22 @@ int16_t minRawAcc;
 //*******************************************END IMU**************************************************
 
 //*******************************************for lora radio******************************************************
-//#include <SPI.h> //SPI used by lora and flash chip
+// #include <SPI.h> //SPI used by lora and flash chip
 #include <RH_RF95.h>
 #define RFM95_CS 10                      // chip select for SPI
 #define RFM95_INT 2                      // interupt pin
-unsigned long nodeID = 1;                // up to 2 million for lorawan?
+unsigned long nodeID = 3;                // up to 2 million for lorawan?
 const boolean forceChangeNodeID = false; // if you want to force the IMU to write this hard coded nodeID to EEPROM and use it. Only needed if you need to change it after it has been programmed
 float frequency = 904.0;                 // Specify the desired frequency in MHz
 // the transmit power in dB. -4 to 20 in 1 dB steps. NOTE-function itself seems to indicate a range of 2-20 dB or 0-15 dB @TODO-research
 int8_t TXpower = 20;
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
+const char *ackMessage = "ACK"; // Acknowledgment message, careful changing this as firmware update of all nodes will be needed. All receive nodes set to not send ACKs to this specific message
 //*******************************************END lora radio**************************************************
 
 //*******************************************for EEPROM**************************************************
 #include <EEPROM.h>
-//NOTE-EEPROM values are ints that start at 0
+// NOTE-EEPROM values are ints that start at 0
 const int nodeIdAddr = 0;     // starting EEPROM address of the 4 bit nodeID and its 4 bit CRC32
 const int minRawAccAddr = 8;  // starting EEPROM address of the 2 bit minium acceleration (but 4 bytes reserved) to trigger interupt and its 4 bit CRC32
 const int maxRawAccAddr = 16; // starting EEPROM address of the 2 bit max acceleration (but 4 bytes reserved) and its 4 bit CRC32
@@ -50,12 +51,16 @@ const int maxRawAccAddr = 16; // starting EEPROM address of the 2 bit max accele
 
 //*******************************************general global variables******************************************************
 boolean debug = true;
-boolean infoON = true; // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
-float firmwareV;
+boolean infoON = true;             // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
+const unsigned int reserved = 1;   // can be used for other things later
+const unsigned int sensorType = 2; // show what sensor type we are using (numbers tracked in other document)
+unsigned int firmwareVMajor;
+unsigned int firmwareVMinor;
 volatile unsigned long secondsSinceBoot = 0;   // seconds since boot or reset.
 volatile unsigned long motionLastDetectedTime; // variable that is written to in ISR and then stored to motionEvents array if conditions are met
-unsigned long motionEvents[10];                // the array to store all the time stamps when motion was detected. 0 means ignore the value
+unsigned long motionEvents[10] = {0};          // DO NOT CHANGE DATA TYPE WITHOUT EDITING CODE the array to store all the time stamps when motion was detected. 0 means ignore the value
 const unsigned int baudRate = 9600;
+const byte randSeedPin = A0; // pin we read from to get a random number to seed the random number generator. Could be removed if needed since the seed it set multiple times in setup
 //*******************************************END general global variables******************************************************
 
 //*******************************************functions******************************************************
@@ -79,10 +84,10 @@ void writeDataWithChecksumToEEPROM(int address, unsigned long data)
 
 boolean testEEPROMchecksum(int address)
 {
-  //NOTE- for now it uses a static 4 byte value for checksum, not CRC32
-  //reads 4 bytes starting at address, then looks at the next 4 bytes for CRC32 value (@TODO)
-  //returns- true if calculated CRC32 matches the data read, false if checksum does not match
-  
+  // NOTE- for now it uses a static 4 byte value for checksum, not CRC32
+  // reads 4 bytes starting at address, then looks at the next 4 bytes for CRC32 value (@TODO)
+  // returns- true if calculated CRC32 matches the data read, false if checksum does not match
+
   unsigned long data;
   // read the data from EEPROM
   EEPROM.get(address, data); // sets 'data' to value here (also returns a refernece to data)
@@ -108,24 +113,36 @@ boolean testEEPROMchecksum(int address)
   }
 }
 
-void uncorrectableError(unsigned int errorNum, const char *errorMessage)
+void uncorrectableError(unsigned int errorNum)
 {
   /*
   call this to halt the program and notify us of some errors we can't recover from
   Error number meanings:
   1-IMU init error
   2-radio init error
+  3-calibration error with IMU
+  4-invalid EEPROM data for minRawAcc
+  5-invalid EEPROM data for maxRawAcc
+  6-error sending the initial radio packet
   */
+  //@TODO-add switch to just create error message from error number
+  // swtich
+  // const char *errorMessage
+
+//force these on for now @TODO-turn off? Battery use doesn't matter much if we hit an error
+  infoON=true;
+  debug=true;
 
   pinMode(LED_BUILTIN, OUTPUT);
   while (true) // just sit here forever
   {
     if (infoON)
     {
-      Serial.print(F("ERROR-uncorrectableError() method called. Halting program & blinking error number times. Error number:"));
+      Serial.print(F("ERROR-uncorrectableError() called. Error number:"));
       Serial.print(errorNum);
-      Serial.println(F(". Error message:"));
-      Serial.println(errorMessage);
+      Serial.println('\n');
+      // Serial.println(F(". Error message:"));
+      // Serial.println(errorMessage);
     }
     for (unsigned int i = 0; i < errorNum; i++) // blink
     {
@@ -153,6 +170,69 @@ void uncorrectableError(unsigned int errorNum, const char *errorMessage)
     }
     delay(500);
   }
+}
+
+void fadeLED()
+{
+  delay(100);
+  // NOTE-fade value needs to be int or it will get stuck, depending if fadeSpeed%255==0 or not
+  byte fadeSpeed = 40;
+  byte delayTime = 30;
+  // fade in from min to max
+  for (int fadeValue = 0; fadeValue <= 255; fadeValue += fadeSpeed)
+  {
+    analogWrite(LED_BUILTIN, fadeValue); // sets the value (range from 0 to 255):
+    delay(delayTime);                    // wait to see the dimming effect
+  }
+  // fade out from max to min
+  for (int fadeValue = 255; fadeValue >= 0; fadeValue -= fadeSpeed)
+  {
+    analogWrite(LED_BUILTIN, fadeValue); // sets the value (range from 0 to 255)
+    delay(delayTime);                    // wait to see the dimming effect
+  }
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(100);
+}
+
+void fadeLED(unsigned int number)
+{
+  /*
+  call this to fade LED a certian number of times
+  */
+
+  // pinMode(LED_BUILTIN, OUTPUT);
+  if (debug)
+  {
+    Serial.print(F("Fading LED X"));
+    Serial.println(number);
+  }
+  delay(700);
+  for (unsigned int i = 0; i < number; i++)
+  {
+    fadeLED();
+  }
+  delay(700);
+
+  /*old code to fade then blink
+  //get attention of user by fading first once
+  fadeLED();
+
+    if (infoON)
+    {
+      Serial.print(F("Blinking LED this number of times:"));
+      Serial.println(number);
+      }
+      //actually blink LED
+    for (unsigned int i = 0; i < number; i++) // blink
+    {
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(300);
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(300);
+    }
+    //end attention of user by fading first once
+    fadeLED();
+    */
 }
 
 long readVcc()
@@ -199,20 +279,20 @@ boolean setupIMU()
 #endif
 
   // initialize device
-  Serial.println(F("Initializing I2C devices..."));
+  Serial.println(F("Initializing IMU..."));
   accelgyro.initialize();
 
   // verify connection
-  Serial.println(F("Testing device connections..."));
+  Serial.println(F("Testing IMU connection..."));
 
   if (accelgyro.testConnection())
   {
-    Serial.println(F("MPU6050 connection successful"));
+    Serial.println(F("Good!"));
     successful = 1;
   }
   else
   {
-    Serial.println(F("MPU6050 connection failed"));
+    Serial.println(F("Fail!"));
     successful = 0;
   }
 
@@ -231,18 +311,24 @@ boolean calibrateIMU()
   {
     Serial.println(F("Getting stationary thresholds. DO NOT MOVE DEVICE..."));
   }
-  delay(1000);
+  if (infoON)
+  {
+    fadeLED(4); // fade the LED to warn user not to touch
+  }
 
   if (debug)
   {
-    Serial.println(F("before saving threshold values, I will show you some from the IMU. CSV format below:"));
-    Serial.println(F("x,y,z"));
-    for (unsigned long i = 0; i < 2000; i++)
+    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
+    Serial.println(F("time (ms),x,y,z"));
+    for (unsigned long i = 0; i < 1000; i++)
     { // max iterations 4294967295
+      char delim = ',';
+      Serial.print(millis());
+      Serial.print(delim);
       Serial.print(accelgyro.getAccelerationX());
-      Serial.print(F(","));
+      Serial.print(delim);
       Serial.print(accelgyro.getAccelerationY());
-      Serial.print(F(","));
+      Serial.print(delim);
       Serial.println(accelgyro.getAccelerationZ());
     }
   }
@@ -293,17 +379,15 @@ boolean calibrateIMU()
   if (infoON)
   {
     digitalWrite(LED_BUILTIN, LOW); // turn off led
-    Serial.print(F("Done getting stationary thresholds. Maxium set to:"));
+    Serial.print(F("Done w/ stationary thresholds. Max set to:"));
     Serial.print(maxRawAcc);
-    Serial.print(F(". Minimum set to:"));
-    Serial.print(minRawAcc);
-    Serial.println(F("."));
+    Serial.print(F(", Min set to:"));
+    Serial.println(minRawAcc);
   }
 
-  //write these values to EEPROM
-    writeDataWithChecksumToEEPROM(minRawAccAddr, minRawAcc);
-    writeDataWithChecksumToEEPROM(maxRawAccAddr, maxRawAcc);
-
+  // write these values to EEPROM
+  writeDataWithChecksumToEEPROM(minRawAccAddr, minRawAcc);
+  writeDataWithChecksumToEEPROM(maxRawAccAddr, maxRawAcc);
 
   //@TODO-lower sample rate
   //@TODO- set motion detect interrupt
@@ -437,8 +521,8 @@ no pins bridged = normal operation
 
   // this is for pins 4 to 7. Set one pin to low, sets next to have input pull up resistor on it. Then Checks if input pull up pin is low. If low, it means its being grounded by the pin before it & it set mode to what corresponds to that pin.
   // note- ATMEGA328P has 20K input pullups. This means at 5V, each read is pulling 5÷20000=0.00025 A (0.25 mA) so OK for a little
-  byte x = 4;
-  for (x; x <= 6; x++)
+  byte x;
+  for (x = 4; x <= 6; x++)
   {
     pinMode(x, OUTPUT);
     digitalWrite(x, LOW);
@@ -520,6 +604,111 @@ no pins bridged = normal operation
   return mode;
 }
 
+byte countMotionEvents()
+{ // count the number of motion events in the SRAM buffer
+  byte count = 0;
+  for (byte i = 0; i < (sizeof(motionEvents) / sizeof(unsigned long)); i++)
+  {
+    if (motionEvents[i] != 0)
+    {
+      count++;
+    }
+    if (debug)
+    {
+      Serial.print(F("i:"));
+      Serial.print(i);
+      Serial.print(F(" motionevents[i]:"));
+      Serial.print(motionEvents[i]);
+      Serial.print(F(" count:"));
+      Serial.println(count);
+    }
+  }
+  return count;
+}
+
+byte sendNodeInfoRadioPacket(byte numEvents)
+{
+  // this sends the header packet that has the node infromation
+  // returns 0 if it worked, 1 if there was a problem with creating the message buffer to send (currently only if debug=true), 2 if problem with send() method
+
+  byte exitCode = 0;
+
+  long supplyV = readVcc();
+  //@TODO-is there a better way than using a garbage variable?
+  char garbage[1];
+  int lengthNeeded; // number of characters that would have been written if message had been sufficiently large, not counting the terminating null character.
+  // format specifiers:%lu for unsigned long, %ld for long, %d for integers (decimal format), %f for floating-point numbers (floating-point format), %c for characters, %s for strings
+  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                  // normally needs ~14 characters
+  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  if (debug)
+  {
+    Serial.print(F("chars needed to write message (I added 1 for null char):"));
+    Serial.println(lengthNeeded + 1);
+    Serial.print(F("Size of message--SIZEOF() EDITION WOWWW:"));
+    Serial.println(sizeof(message));
+  }
+  if ((lengthNeeded + 1) > (sizeof(message) / sizeof(char)))
+  {
+    // truncated message alert!
+    if (infoON)
+    {
+      Serial.println(F("WARNING-the message char array buffer is too short to contain the radio message. It has been truncated by snprintf."));
+    }
+    if (debug)
+    { // consider this a fatal error only when debuging since we still want it to send the message @TODO-do we want this behavior, we should never reach here?
+      exitCode = 1;
+    }
+  }
+
+  if (infoON)
+  {
+    Serial.println(F("Sending data:"));
+    Serial.println(message);
+    // fadeLED(counter); // blink the LED a certain number of times before sending message.
+    digitalWrite(LED_BUILTIN, HIGH); // turn on LED to indicate radio is on
+  }
+  // wait if there is another packet already sending, not really neeed since send() does this anyway
+  rf95.waitPacketSent();
+  if (!rf95.send((uint8_t *)message, strlen(message)))
+  {
+    exitCode = 2;
+  }
+  if (infoON)
+  {
+    digitalWrite(LED_BUILTIN, LOW);
+    Serial.println(F("Packet is either being sent (& will finish soon) or is already sent."));
+  }
+
+  return exitCode;
+}
+
+byte checkForACK(unsigned int msToWaitAfterSend)
+{
+  // returns 1 if no and ACK received, 0 if it did
+  byte exitCode = 0;
+
+  // wait if we are sending something else. Can't get an ACK if we are still sending.
+  rf95.waitPacketSent();
+  delay(msToWaitAfterSend);
+  if (rf95.available())
+  { // note- we need to delay because .available() returns true only if there is a new, complete, error free message
+    uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+    uint8_t len = sizeof(buf);
+    if (rf95.recv(buf, &len)) // recv wants two pointers. You don't need to use &buf because C++ returns the address to the first element &len returns memory address of len
+    {
+      boolean messageIsACK = strncmp((char *)buf, ackMessage, strlen(ackMessage)) == 0; // compaire the first characters of buffer to see if this is ACK message
+      if (!messageIsACK)
+      {
+        exitCode = 1;
+      }
+
+    } // end if rf95.recv
+  }   // end if rf95.available()
+
+  return exitCode;
+}
+
 // ISR function to handle a motion interupt from IMU
 void IMUinterupt()
 {
@@ -532,22 +721,35 @@ void IMUinterupt()
 
 void setup()
 {
-  Serial.begin(baudRate);
-  Serial.println();
-  Serial.println();
-  Serial.println(F("Compiled with VSCode and platformIO core V5.2.0 ")); //@TODO-update this whenever compiling
-  Serial.println(F("and library: electroniccats/MPU6050@^0.4.0"));
-  Serial.println(F("MPU6050 test V 1.0"));
-  Serial.println(F("This firmware mointors for elevator motion and sends packets when sensed."));
+
   /*
    * Version history:
    * V1.0-initial
    *
    * @TODO:
    * allow changing of nodeID somehow (serial or from radio?)
+   * change delimiters from a simple comma to a set of perhaps -_,<>:;~ to get a base 8 system to transmit other data at the end. If needing to transmit 3 variables (plus one encoded in delims), we would have 2 delimiters, resulting in 64 possible combinations (5 bits). OR if using a set of 16 delims (as with this set `~-_=+[{}];:,</?) can send a full byte with 2 delims
+   * switch all methods to return exit codes instead of boolean
    */
+  firmwareVMajor = 1;
+  firmwareVMinor = 0;
 
-  // Pin setup
+  Serial.begin(baudRate);
+  Serial.println();
+  Serial.println();
+  Serial.println(F("Compiled with VSCode and platformIO core")); //@TODO-update this whenever compiling
+  Serial.println(F("and libraries: electroniccats/MPU6050, mikem/RadioHead"));
+  Serial.print(F("Elevator sensor V "));
+  Serial.print(reserved);
+  Serial.print('.');
+  Serial.print(sensorType);
+  Serial.print('.');
+  Serial.print(firmwareVMajor);
+  Serial.print('.');
+  Serial.println(firmwareVMinor);
+  Serial.println(F("This firmware mointors for elevator motion and sends packets when sensed."));
+
+  // Pin setup & RNG setup
   // let us know its alive
   // Note according to (http://www.gammon.com.au/power), power consumption is the same if INPUT or OUTPUT. Thing that matters is internal pullups. If must be high, INPUT preferred
   pinMode(LED_BUILTIN, OUTPUT);
@@ -558,15 +760,22 @@ void setup()
     digitalWrite(LED_BUILTIN, LOW);
     delay(300);
   }
+  unsigned long randSeed = analogRead(randSeedPin);
+  randomSeed(randSeed);
+  if (debug)
+  {
+    Serial.print(F("randSeed="));
+    Serial.println(randSeed);
+  }
 
-  // initilize stuff and throw errors if a failure
+  // initilize hardware and throw errors if a failure
   if (!setupIMU())
   {
-    uncorrectableError(1, "Error starting IMU!");
+    uncorrectableError(1);
   }
   if (!setupRadio())
   {
-    uncorrectableError(2, "Error starting radio!");
+    uncorrectableError(2);
   }
 
   byte mode = checkJumperMode();
@@ -574,7 +783,7 @@ void setup()
   {
     if (!calibrateIMU())
     {
-      uncorrectableError(3, "Error calibrating IMU!");
+      uncorrectableError(3);
     }
   }
 
@@ -590,10 +799,9 @@ void setup()
       Serial.println(F("EEPROM data invalid at address below (according to checksum). (Its value also below)."));
       Serial.print(F("EEPROM Address in question:"));
       Serial.println(tempAddr);
-      }
-      uncorrectableError(4, "Invalid EEPROM data for motion acceleration threshold (low value).");
-//throw error instead of writing hard coded one
-    //writeDataWithChecksumToEEPROM(tempAddr, tempData);
+    }
+    uncorrectableError(4);
+    // or we could just go with default if we didn't want this to be an error writeDataWithChecksumToEEPROM(tempAddr, tempData);
   }
   else
   {
@@ -604,14 +812,14 @@ void setup()
       Serial.println(tempAddr);
       Serial.print(F("Data sizeof() result:"));
       Serial.println(sizeof(tempData));
-      Serial.print(F("overwriting this value:"));
+      Serial.print(F("Old value in SRAM:"));
       Serial.println(tempData);
     }
 
     EEPROM.get(tempAddr, tempData); // sets data to the value in EEPROM (function also returns a refernece to data)
     if (debug)
     {
-      Serial.print(F("New value:"));
+      Serial.print(F("New value from EEPROM, now in SRAM:"));
       Serial.println(tempAddr);
     }
   }
@@ -619,7 +827,7 @@ void setup()
   minRawAcc = (int)tempData;
   if (debug)
   {
-    Serial.print(F("minRawAcc value:"));
+    Serial.print(F("New minRawAcc value:"));
     Serial.println(minRawAcc);
   }
   //******Do same for max value
@@ -634,10 +842,10 @@ void setup()
       Serial.println(F("EEPROM data invalid at address below (according to checksum). (Its value also below)."));
       Serial.print(F("EEPROM Address in question:"));
       Serial.println(tempAddr);
-      }
-      uncorrectableError(5, "Invalid EEPROM data for motion acceleration threshold (high value).");
-//throw error instead of writing hard coded one
-    //writeDataWithChecksumToEEPROM(tempAddr, tempData);
+    }
+    uncorrectableError(5);
+    // throw error instead of writing hard coded one
+    // writeDataWithChecksumToEEPROM(tempAddr, tempData);
   }
   else
   {
@@ -648,14 +856,14 @@ void setup()
       Serial.println(tempAddr);
       Serial.print(F("Data sizeof() result:"));
       Serial.println(sizeof(tempData));
-      Serial.print(F("overwriting this value:"));
+      Serial.print(F("Old value in SRAM:"));
       Serial.println(tempData);
     }
 
     EEPROM.get(tempAddr, tempData); // sets data to the value in EEPROM (function also returns a refernece to data)
     if (debug)
     {
-      Serial.print(F("New value:"));
+      Serial.print(F("New value from EEPROM, now in SRAM:"));
       Serial.println(tempAddr);
     }
   }
@@ -663,15 +871,39 @@ void setup()
   maxRawAcc = (int)tempData;
   if (debug)
   {
-    Serial.print(F("maxRawAcc value:"));
+    Serial.print(F("New maxRawAcc value:"));
     Serial.println(maxRawAcc);
   }
+
+  //*******send a "node online" message so the other side knows we have a new "node time" for this nodeID, saying we have 255 motion events alerts the system that this is the "node just booted packet"
+  unsigned int timeToWaitForAck = 50; // time in ms we will wait for an ACK, after our message has sent. @TODO-measure this to determine a better starting point
+  byte exitCodefromACK;
+  do
+  {
+    if (sendNodeInfoRadioPacket(255) != 0)
+    { // if we don't get success back from this, then we had some problem sending that we can't fix
+      uncorrectableError(6);
+    }
+    exitCodefromACK = checkForACK(timeToWaitForAck);
+    if (exitCodefromACK != 0) // if we didn't get an ACK, increase the time we wait and also delay a random amount of time before trying to send again
+    {
+      timeToWaitForAck = timeToWaitForAck + 50; //@TODO-determine how much time to wait better
+      delay(random(1000, 10000));               // wait a random ammount of time within a certain range of ms. @TODO-write code to calculate how long it takes to send ACK, given current TX params and set this as minimum
+    }
+  } while (exitCodefromACK != 0); // keep trying if we did not get an ACK @TODO-add a timeout value here also and call uncorrectable error
 
   // set the IMU interupt for the motion thesholds we either read from EEPROM or calibrated (@TODO-will set interupt in next version of program)
   // pinMode(interruptPin, INPUT_PULLUP); // Set pin 3 as an input with internal pull-up
   // attachInterrupt(digitalPinToInterrupt(interruptPin), detectRisingSignal, FALLING); @TODO-check if the IMU is RISING FALLING or what
 
-//send a "node online" message so the other side knows we have a new "node time" for this nodeID
+  // setup should take such a variable amount of time, this should be good
+  randSeed = micros(); // unsigned long
+  randomSeed(randSeed);
+  if (debug)
+  {
+    Serial.print(F("randSeed="));
+    Serial.println(randSeed);
+  }
 
   if (infoON)
   {
@@ -693,7 +925,8 @@ int16_t gx, gy, gz;
   accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 */
 
-  int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
+  //int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
+  int16_t totalAcc = long(accelgyro.getAccelerationX());
 
   //@TODO-replace this with sleep and intterupt code.
   if ((totalAcc > maxRawAcc) || (totalAcc < minRawAcc))
