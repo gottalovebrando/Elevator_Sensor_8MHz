@@ -126,15 +126,15 @@ void uncorrectableError(unsigned int errorNum)
   6-error sending the initial radio packet
   */
   //@TODO-add switch to just create error message from error number
-  // swtich
+  // swtich(errorNum)
   // const char *errorMessage
 
-//force these on for now @TODO-turn off? Battery use doesn't matter much if we hit an error
-  infoON=true;
-  debug=true;
+  // force these on for now @TODO-turn off? Battery use doesn't matter much if we hit an error
+  infoON = true;
+  debug = true;
 
   pinMode(LED_BUILTIN, OUTPUT);
-  while (true) // just sit here forever
+  while (true) // just sit here until power loss or reset
   {
     if (infoON)
     {
@@ -153,7 +153,7 @@ void uncorrectableError(unsigned int errorNum)
     }
     delay(500);
     // fade in from min to max
-    for (byte fadeValue = 0; fadeValue <= 255; fadeValue += 10)
+    for (byte fadeValue = 0; fadeValue <= 255; fadeValue += 1)
     {
       // sets the value (range from 0 to 255):
       analogWrite(LED_BUILTIN, fadeValue);
@@ -161,7 +161,7 @@ void uncorrectableError(unsigned int errorNum)
       delay(30);
     }
     // fade out from max to min
-    for (byte fadeValue = 255; fadeValue >= 0; fadeValue -= 10)
+    for (byte fadeValue = 255; fadeValue >= 0; fadeValue -= 1)
     {
       // sets the value (range from 0 to 255):
       analogWrite(LED_BUILTIN, fadeValue);
@@ -173,7 +173,7 @@ void uncorrectableError(unsigned int errorNum)
 }
 
 void fadeLED()
-{
+{//fades LED once
   delay(100);
   // NOTE-fade value needs to be int or it will get stuck, depending if fadeSpeed%255==0 or not
   byte fadeSpeed = 40;
@@ -306,22 +306,21 @@ boolean calibrateIMU()
   */
 
   boolean successful = 1;
+  boolean infoONOld = infoON;
+  infoON = true; // force for now
 
   if (infoON)
   {
     Serial.println(F("Getting stationary thresholds. DO NOT MOVE DEVICE..."));
-  }
-  if (infoON)
-  {
-    fadeLED(4); // fade the LED to warn user not to touch
+    fadeLED(10); // fade the LED to warn user not to touch
   }
 
   if (debug)
   {
     Serial.println(F("DEBUG-before calibration, priting IMU readings."));
     Serial.println(F("time (ms),x,y,z"));
-    for (unsigned long i = 0; i < 1000; i++)
-    { // max iterations 4294967295
+    for (byte i = 0; i < 3; i++)
+    { // max iterations for unsigned long is 4294967295
       char delim = ',';
       Serial.print(millis());
       Serial.print(delim);
@@ -345,7 +344,13 @@ boolean calibrateIMU()
   totalAcc = accelgyro.getAccelerationX();
   minRawAcc = totalAcc;
   maxRawAcc = totalAcc;
-  while ((millis() - startT) < long(102000)) // collect max and min for 1.7 mins (102000 ms)
+  long calibrationT = 102000;
+  if (debug)
+  {
+    Serial.println(F("DEBUG-CalibrateIMU():shortening calibration time to 5s."));
+    calibrationT = 1000;
+  }
+  while ((millis() - startT) < calibrationT) // collect max and min for 1.7 mins (102000 ms)
   {
     // totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
     totalAcc = accelgyro.getAccelerationX();
@@ -413,6 +418,7 @@ boolean calibrateIMU()
     Serial.print(accelgyro.getZGyroOffset()); Serial.print("\t"); // 0
     Serial.print("\n");
     */
+  infoON = infoONOld; // set back to what it was
 
   return successful;
 } // End calibrate IMU
@@ -432,7 +438,7 @@ boolean setupRadio()
   {
     if (debug)
     {
-      Serial.print(F("no nodeID found in EEPROM (according to checksum or being forced to update nodeID with forceChangeNodeID), setting hard coded one. Its value:"));
+      Serial.print(F("No nodeID found in EEPROM or forced update with forceChangeNodeID=TRUE. Setting NodeID to:"));
       Serial.println(nodeID);
       Serial.print(F("forceChangeNodeID value:"));
       Serial.println(forceChangeNodeID);
@@ -484,7 +490,9 @@ boolean setupRadio()
       }
       worked = 0;
     }
-  } // end if(success)
+
+    //@TODO- add setPayloadCRC(true); (this is default but needs testing), setPreambleLength(8)
+  } // end if(worked)
 
   if (infoON)
   {
@@ -497,7 +505,7 @@ boolean setupRadio()
     }
     Serial.print(F("Device version from register 42:"));
     Serial.println(rf95.getDeviceVersion());
-    Serial.println(F("nodeID set to:"));
+    Serial.print(F("nodeID set to:"));
     Serial.println(nodeID);
     //@TODO-consider printing other things like maxMessageLength() (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#ab273e242758e3cc2ed2679ef795a7196)
   }
@@ -550,6 +558,8 @@ no pins bridged = normal operation
   {
     Serial.print(F("setting INPUT on pin :"));
     Serial.println(x + 1);
+    Serial.print(F("Mode is:"));
+    Serial.println(mode);
   }
   pinMode(x + 1, INPUT);
 
@@ -587,18 +597,14 @@ no pins bridged = normal operation
     {
       Serial.begin(baudRate);
       pinMode(LED_BUILTIN, OUTPUT);
+      Serial.print(F("Mode is:"));
+      Serial.println(mode);
     }
     else
     {
       Serial.end();
       pinMode(LED_BUILTIN, INPUT);
     }
-  }
-
-  if (debug)
-  {
-    Serial.print(F("Mode is: "));
-    Serial.println(mode);
   }
 
   return mode;
@@ -626,7 +632,7 @@ byte countMotionEvents()
   return count;
 }
 
-byte sendNodeInfoRadioPacket(byte numEvents)
+byte sendNodeInfoRadioPacket(unsigned int numEvents)
 {
   // this sends the header packet that has the node infromation
   // returns 0 if it worked, 1 if there was a problem with creating the message buffer to send (currently only if debug=true), 2 if problem with send() method
@@ -638,9 +644,9 @@ byte sendNodeInfoRadioPacket(byte numEvents)
   char garbage[1];
   int lengthNeeded; // number of characters that would have been written if message had been sufficiently large, not counting the terminating null character.
   // format specifiers:%lu for unsigned long, %ld for long, %d for integers (decimal format), %f for floating-point numbers (floating-point format), %c for characters, %s for strings
-  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
-  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                  // normally needs ~14 characters
-  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                 // normally needs ~14 characters
+  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
   if (debug)
   {
     Serial.print(F("chars needed to write message (I added 1 for null char):"));
@@ -649,11 +655,10 @@ byte sendNodeInfoRadioPacket(byte numEvents)
     Serial.println(sizeof(message));
   }
   if ((lengthNeeded + 1) > (sizeof(message) / sizeof(char)))
-  {
-    // truncated message alert!
+  { // truncated message alert!
     if (infoON)
     {
-      Serial.println(F("WARNING-the message char array buffer is too short to contain the radio message. It has been truncated by snprintf."));
+      Serial.println(F("WARNING-char *message too short to contain radio message. Truncated by snprintf."));
     }
     if (debug)
     { // consider this a fatal error only when debuging since we still want it to send the message @TODO-do we want this behavior, we should never reach here?
@@ -663,7 +668,7 @@ byte sendNodeInfoRadioPacket(byte numEvents)
 
   if (infoON)
   {
-    Serial.println(F("Sending data:"));
+    Serial.print(F("Sending data:"));
     Serial.println(message);
     // fadeLED(counter); // blink the LED a certain number of times before sending message.
     digitalWrite(LED_BUILTIN, HIGH); // turn on LED to indicate radio is on
@@ -685,11 +690,31 @@ byte sendNodeInfoRadioPacket(byte numEvents)
 
 byte checkForACK(unsigned int msToWaitAfterSend)
 {
-  // returns 1 if no and ACK received, 0 if it did
-  byte exitCode = 0;
+  /*
+  checks the radio to see if we have an ACK message.
+  Returns:
+  0 if ACK received
+  1 if some other message received
+  2 if nothing received
+  */
+  byte exitCode = 2;
+  unsigned long startT = millis(); //@TODO-remove this
+  if (debug)
+  {
+    Serial.print(F("checkForAck():Waiting to finish sending..."));
+  }
+  rf95.waitPacketSent(); // wait if we are sending something else. Can't get an ACK if we are still sending.
 
-  // wait if we are sending something else. Can't get an ACK if we are still sending.
-  rf95.waitPacketSent();
+  //try rf95.setModeRx();
+  if (debug)
+  {
+    Serial.print(F("Done waiting. ms elapsed:"));
+    Serial.println(millis() - startT);
+    Serial.print(F("checkForAck():delaying:"));
+    Serial.println(msToWaitAfterSend);
+  }
+
+  //Try  rf95.isChannelActive();
   delay(msToWaitAfterSend);
   if (rf95.available())
   { // note- we need to delay because .available() returns true only if there is a new, complete, error free message
@@ -697,10 +722,19 @@ byte checkForACK(unsigned int msToWaitAfterSend)
     uint8_t len = sizeof(buf);
     if (rf95.recv(buf, &len)) // recv wants two pointers. You don't need to use &buf because C++ returns the address to the first element &len returns memory address of len
     {
+      if (debug)
+      {
+        Serial.print(F("checkForACK():received message:"));
+        Serial.println((char *)buf); // casts this as a chracter array?? @TODO-check
+      }
       boolean messageIsACK = strncmp((char *)buf, ackMessage, strlen(ackMessage)) == 0; // compaire the first characters of buffer to see if this is ACK message
       if (!messageIsACK)
       {
         exitCode = 1;
+      }
+      else
+      {
+        exitCode = 0;
       }
 
     } // end if rf95.recv
@@ -750,9 +784,12 @@ void setup()
   Serial.println(F("This firmware mointors for elevator motion and sends packets when sensed."));
 
   // Pin setup & RNG setup
-  // let us know its alive
   // Note according to (http://www.gammon.com.au/power), power consumption is the same if INPUT or OUTPUT. Thing that matters is internal pullups. If must be high, INPUT preferred
   pinMode(LED_BUILTIN, OUTPUT);
+  if (debug)
+  {
+    Serial.println(F("blink LED..."));
+  }
   for (byte i = 0; i < 5; i++) // blink LED a little
   {
     digitalWrite(LED_BUILTIN, HIGH);
@@ -807,10 +844,9 @@ void setup()
   {
     if (debug)
     {
-      Serial.println(F("Valid data in EEPROM found at address below (according to checksum), getting value from EEPROM. (Its value also below)."));
-      Serial.print(F("EEPROM Address in question:"));
+      Serial.print(F("Valid data at EEPROM address:"));
       Serial.println(tempAddr);
-      Serial.print(F("Data sizeof() result:"));
+      Serial.print(F("sizeof(data):"));
       Serial.println(sizeof(tempData));
       Serial.print(F("Old value in SRAM:"));
       Serial.println(tempData);
@@ -820,14 +856,14 @@ void setup()
     if (debug)
     {
       Serial.print(F("New value from EEPROM, now in SRAM:"));
-      Serial.println(tempAddr);
+      Serial.println(tempData);
     }
   }
   //@TODO-make sure no problems with this conversion
   minRawAcc = (int)tempData;
-  if (debug)
+  if (infoON)
   {
-    Serial.print(F("New minRawAcc value:"));
+    Serial.print(F("minRawAcc value:"));
     Serial.println(minRawAcc);
   }
   //******Do same for max value
@@ -851,10 +887,9 @@ void setup()
   {
     if (debug)
     {
-      Serial.println(F("Valid data in EEPROM found at address below (according to checksum), getting value from EEPROM. (Its value also below)."));
-      Serial.print(F("EEPROM Address in question:"));
+      Serial.print(F("Valid data at EEPROM address:"));
       Serial.println(tempAddr);
-      Serial.print(F("Data sizeof() result:"));
+      Serial.print(F("sizeof(data):"));
       Serial.println(sizeof(tempData));
       Serial.print(F("Old value in SRAM:"));
       Serial.println(tempData);
@@ -864,19 +899,27 @@ void setup()
     if (debug)
     {
       Serial.print(F("New value from EEPROM, now in SRAM:"));
-      Serial.println(tempAddr);
+      Serial.println(tempData);
     }
   }
   //@TODO-make sure no problems with this conversion
   maxRawAcc = (int)tempData;
-  if (debug)
+  if (infoON)
   {
-    Serial.print(F("New maxRawAcc value:"));
+    Serial.print(F("maxRawAcc value:"));
     Serial.println(maxRawAcc);
   }
 
   //*******send a "node online" message so the other side knows we have a new "node time" for this nodeID, saying we have 255 motion events alerts the system that this is the "node just booted packet"
-  unsigned int timeToWaitForAck = 50; // time in ms we will wait for an ACK, after our message has sent. @TODO-measure this to determine a better starting point
+//@TODO-calculate how long it takes to send an ACK using the given paramaters. datasheet is garbage but it seems to indicate the time is something like this:
+//Ts=(2^SF)/(BW(in kHz??)*1000)
+//Tpreable=(Lpreamble+4.25)*Ts Lpreamble default is 12
+//Tpayload=Ts*(8+ROUNDUP((8*Lpayload-4*SF+[implicit header=24, explicit=44])/(4*SF)))*(CR+4)
+//T on air=Tpreable+Tpayload
+//Assuming 20 km (lora abs max range) and speed of light 300,000 km/s 20÷300000=0.000066667 (66.7 us) one way max
+//for some reason, initial delay of 10000 doesn't work. 110 works but only on second transmit
+  unsigned int timeToWaitForAck = 110; // time in ms we will wait for an ACK, after our message has sent. Trip time + rx delay + time on air + trip time
+  
   byte exitCodefromACK;
   do
   {
@@ -884,11 +927,22 @@ void setup()
     { // if we don't get success back from this, then we had some problem sending that we can't fix
       uncorrectableError(6);
     }
-    exitCodefromACK = checkForACK(timeToWaitForAck);
+    exitCodefromACK = checkForACK(timeToWaitForAck); //@TODO-change behavior here to handle no message received at all vs message received but not ACK
+    if (debug)
+    {
+      Serial.print(F("exitCodefromACK:"));
+      Serial.println(exitCodefromACK);
+    }
     if (exitCodefromACK != 0) // if we didn't get an ACK, increase the time we wait and also delay a random amount of time before trying to send again
     {
       timeToWaitForAck = timeToWaitForAck + 50; //@TODO-determine how much time to wait better
-      delay(random(1000, 10000));               // wait a random ammount of time within a certain range of ms. @TODO-write code to calculate how long it takes to send ACK, given current TX params and set this as minimum
+      if (infoON)
+      {
+        Serial.print(F("No ACK received within timeout. Trying again. New timeout:"));
+        Serial.println(timeToWaitForAck);
+      }
+      // delay(timeToWaitForAck);
+      delay(random(1000, 10000)); // wait a random ammount of time within a certain range of ms. @TODO-write code to calculate how long it takes to send ACK, given current TX params and set this as minimum
     }
   } while (exitCodefromACK != 0); // keep trying if we did not get an ACK @TODO-add a timeout value here also and call uncorrectable error
 
@@ -907,17 +961,34 @@ void setup()
 
   if (infoON)
   {
-    Serial.println(F("Setup complete. Begin running loop()"));
+    Serial.println();
+    Serial.println();
+    Serial.println(F("****Setup complete!****"));
+    Serial.println();
+    Serial.println();
   }
 } // end setup
 
 void loop()
 {
 
-  /********************************
-IMU stuff
-*/
+//mimic sleep
+//if(rf95.sleep()){//good}
+//rf95.setModeTx(); or this maybe rf95.setModeIdle();
 
+
+  static unsigned long previousMillis = 0;
+  if ((millis() - previousMillis) >= 10000)
+  {                            // check after a delay because this consumes power. 300000 ms = 5 min
+    previousMillis = millis(); // Reset the timer, not precise
+    if (debug)
+    {
+      Serial.println(F("Checking jumper mode."));
+    }
+    checkJumperMode();
+  }
+
+  /******************************** IMU stuff
   /*
   //if using the functions requiring pointers
 int16_t ax, ay, az;
@@ -925,26 +996,29 @@ int16_t gx, gy, gz;
   accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 */
 
-  //int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
+  // int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
   int16_t totalAcc = long(accelgyro.getAccelerationX());
 
   //@TODO-replace this with sleep and intterupt code.
   if ((totalAcc > maxRawAcc) || (totalAcc < minRawAcc))
   {
-    Serial.print(F("Motion detected! "));
-    if (totalAcc < minRawAcc)
+    if (infoON)
     {
-      Serial.print(F("Went below minRawAcc (which is "));
-      Serial.print(minRawAcc);
-      Serial.print(F(") Value was:"));
-      Serial.println(totalAcc);
-    }
-    if (totalAcc > maxRawAcc)
-    {
-      Serial.print(F("Went above maxRawAcc (which is "));
-      Serial.print(maxRawAcc);
-      Serial.print(F(") Value was:"));
-      Serial.println(totalAcc);
+      Serial.print(F("Motion detected! "));
+      if (totalAcc < minRawAcc)
+      {
+        Serial.print(F("Went below minRawAcc (which is "));
+        Serial.print(minRawAcc);
+        Serial.print(F(") Value was:"));
+        Serial.println(totalAcc);
+      }
+      if (totalAcc > maxRawAcc)
+      {
+        Serial.print(F("Went above maxRawAcc (which is "));
+        Serial.print(maxRawAcc);
+        Serial.print(F(") Value was:"));
+        Serial.println(totalAcc);
+      }
     }
   }
 
