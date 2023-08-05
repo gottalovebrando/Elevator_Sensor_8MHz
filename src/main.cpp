@@ -11,6 +11,7 @@
 //*******************************************general libraries******************************************************
 #include <Arduino.h>
 // #include <CRC32.h> //@TODO-implement CRC for all EEPROM values
+#include "moteino_shared_functions.h" // custom functions for this project
 //*******************************************END general libraries******************************************************
 
 //*******************************************for IMU******************************************************
@@ -28,8 +29,9 @@ int16_t minRawAcc;
 //*******************************************END IMU**************************************************
 
 //*******************************************for lora radio******************************************************
-// #include <SPI.h> //SPI used by lora and flash chip
+#include <RHReliableDatagram.h>
 #include <RH_RF95.h>
+// #include <SPI.h> //SPI used by lora and flash chip
 #define RFM95_CS 10                      // chip select for SPI
 #define RFM95_INT 2                      // interupt pin
 unsigned long nodeID = 3;                // up to 2 million for lorawan?
@@ -50,7 +52,7 @@ const int maxRawAccAddr = 16; // starting EEPROM address of the 2 bit max accele
 //*******************************************END EEPROM**************************************************
 
 //*******************************************general global variables******************************************************
-boolean debug = true;
+bool debug = true;
 boolean infoON = true;             // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
 const unsigned int reserved = 1;   // can be used for other things later
 const unsigned int sensorType = 2; // show what sensor type we are using (numbers tracked in other document)
@@ -64,176 +66,6 @@ const byte randSeedPin = A0; // pin we read from to get a random number to seed 
 //*******************************************END general global variables******************************************************
 
 //*******************************************functions******************************************************
-
-void writeDataWithChecksumToEEPROM(int address, unsigned long data)
-{
-  // Write the integer data to EEPROM
-  EEPROM.put(address, data);
-
-  // Calculate the CRC32 checksum of the data and save it to EEPROM
-  //@TODO-get this to work
-  // uint32_t checksum = CRC32::calculate(data, sizeof(data));
-  /* this works
-   *uint8_t byteBuffer[] = "Hello World";
-   *uint32_t checksum = CRC32::calculate(byteBuffer, sizeof(data));
-   */
-
-  uint32_t checksum = 3545618; // good enough for now
-  EEPROM.put(address + sizeof(data), checksum);
-}
-
-boolean testEEPROMchecksum(int address)
-{
-  // NOTE- for now it uses a static 4 byte value for checksum, not CRC32
-  // reads 4 bytes starting at address, then looks at the next 4 bytes for CRC32 value (@TODO)
-  // returns- true if calculated CRC32 matches the data read, false if checksum does not match
-
-  unsigned long data;
-  // read the data from EEPROM
-  EEPROM.get(address, data); // sets 'data' to value here (also returns a refernece to data)
-  uint32_t checksumEEPROM;
-  EEPROM.get(address + sizeof(data), checksumEEPROM);
-
-  // Calculate the CRC32 checksum of the data and compare it to data
-  //@TODO-get this to work
-  // uint32_t checksumCalc = CRC32::calculate(data, sizeof(data));
-  /* this works
-   *uint8_t byteBuffer[] = "Hello World";
-   *uint32_t checksum = CRC32::calculate(byteBuffer, sizeof(data));
-   */
-
-  uint32_t checksumCalc = 3545618; // good enough for now
-  if (checksumEEPROM == checksumCalc)
-  {
-    return true;
-  }
-  else
-  {
-    return false;
-  }
-}
-
-void uncorrectableError(unsigned int errorNum)
-{
-  /*
-  call this to halt the program and notify us of some errors we can't recover from
-  Error number meanings:
-  1-IMU init error
-  2-radio init error
-  3-calibration error with IMU
-  4-invalid EEPROM data for minRawAcc
-  5-invalid EEPROM data for maxRawAcc
-  6-error sending the initial radio packet
-  */
-  //@TODO-add switch to just create error message from error number
-  // swtich(errorNum)
-  // const char *errorMessage
-
-  // force these on for now @TODO-turn off? Battery use doesn't matter much if we hit an error
-  infoON = true;
-  debug = true;
-
-  pinMode(LED_BUILTIN, OUTPUT);
-  while (true) // just sit here until power loss or reset
-  {
-    if (infoON)
-    {
-      Serial.print(F("ERROR-uncorrectableError() called. Error number:"));
-      Serial.print(errorNum);
-      Serial.println('\n');
-      // Serial.println(F(". Error message:"));
-      // Serial.println(errorMessage);
-    }
-    for (unsigned int i = 0; i < errorNum; i++) // blink
-    {
-      digitalWrite(LED_BUILTIN, HIGH); // Turn the LED on
-      delay(500);                      // Wait for half a second (500 milliseconds)
-      digitalWrite(LED_BUILTIN, LOW);  // Turn the LED off
-      delay(500);                      // Wait for half a second (500 milliseconds)
-    }
-    delay(500);
-    // fade in from min to max
-    for (byte fadeValue = 0; fadeValue <= 255; fadeValue += 1)
-    {
-      // sets the value (range from 0 to 255):
-      analogWrite(LED_BUILTIN, fadeValue);
-      // wait for 30 milliseconds to see the dimming effect
-      delay(30);
-    }
-    // fade out from max to min
-    for (byte fadeValue = 255; fadeValue >= 0; fadeValue -= 1)
-    {
-      // sets the value (range from 0 to 255):
-      analogWrite(LED_BUILTIN, fadeValue);
-      // wait for 30 milliseconds to see the dimming effect
-      delay(30);
-    }
-    delay(500);
-  }
-}
-
-void fadeLED()
-{//fades LED once
-  delay(100);
-  // NOTE-fade value needs to be int or it will get stuck, depending if fadeSpeed%255==0 or not
-  byte fadeSpeed = 40;
-  byte delayTime = 30;
-  // fade in from min to max
-  for (int fadeValue = 0; fadeValue <= 255; fadeValue += fadeSpeed)
-  {
-    analogWrite(LED_BUILTIN, fadeValue); // sets the value (range from 0 to 255):
-    delay(delayTime);                    // wait to see the dimming effect
-  }
-  // fade out from max to min
-  for (int fadeValue = 255; fadeValue >= 0; fadeValue -= fadeSpeed)
-  {
-    analogWrite(LED_BUILTIN, fadeValue); // sets the value (range from 0 to 255)
-    delay(delayTime);                    // wait to see the dimming effect
-  }
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(100);
-}
-
-void fadeLED(unsigned int number)
-{
-  /*
-  call this to fade LED a certian number of times
-  */
-
-  // pinMode(LED_BUILTIN, OUTPUT);
-  if (debug)
-  {
-    Serial.print(F("Fading LED X"));
-    Serial.println(number);
-  }
-  delay(700);
-  for (unsigned int i = 0; i < number; i++)
-  {
-    fadeLED();
-  }
-  delay(700);
-
-  /*old code to fade then blink
-  //get attention of user by fading first once
-  fadeLED();
-
-    if (infoON)
-    {
-      Serial.print(F("Blinking LED this number of times:"));
-      Serial.println(number);
-      }
-      //actually blink LED
-    for (unsigned int i = 0; i < number; i++) // blink
-    {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(300);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(300);
-    }
-    //end attention of user by fading first once
-    fadeLED();
-    */
-}
 
 long readVcc()
 {
@@ -297,6 +129,96 @@ boolean setupIMU()
   }
 
   return successful;
+}
+
+boolean setupRadio()
+{
+  /*
+  Starts the LoRa radio, reads from EEPROM for some settings (e.g. nodeID)
+  Returns: 1 if successful, 0 if failed
+  */
+
+  boolean worked = 1; // start at 1 and set to 0 if errors
+
+  //@TODO-put in function
+  // set the nodeID to value in EEPROM if one
+  if (!testEEPROMchecksum(nodeIdAddr) || forceChangeNodeID) // if the checksum is invalid or we are being forced to change nodeID, then set node ID to whatever was hard coded when firmware flashed, else read node ID from EEPROM
+  {
+    if (debug)
+    {
+      Serial.print(F("No nodeID found in EEPROM or forced update with forceChangeNodeID=TRUE. Setting NodeID to:"));
+      Serial.println(nodeID);
+      Serial.print(F("forceChangeNodeID value:"));
+      Serial.println(forceChangeNodeID);
+    }
+    writeDataWithChecksumToEEPROM(nodeIdAddr, nodeID);
+  }
+  else
+  {
+    EEPROM.get(nodeIdAddr, nodeID); // sets data to value here (also returns a refernece to data)
+    if (debug)
+    {
+      Serial.print(F("valid nodeID found in EEPROM, set my nodeID to:"));
+      Serial.println(nodeID);
+    }
+  }
+
+  // start RFM95 radio
+  if (!rf95.init())
+  {
+    if (infoON)
+    {
+      Serial.println(F("RFM95 initialization failed"));
+    }
+    worked = 0;
+  }
+
+  if (worked)
+  {
+    // Set RFM95 transmission parameters
+    // These 5 paramenter settings results in max range. The allowed values also come from this source (source:M. Bor and U. Roedig, “LoRa Transmission Parameter Selection,” in 2017 13th International Conference on Distributed Computing in Sensor Systems (DCOSS), Jun. 2017, pp. 27–34. doi: 10.1109/DCOSS.2017.10.)
+    // Note- some set functions do not return anything so don't need to check for sucess.
+
+    //  Set transmit power to the maximum (20 dBm), @TODO-double check docs for 2nd value. false is if PA_BOOST pin is used and true is RFO pin is used on RFM95 module
+    // seems like true (and any value) results in weak signal, false (and any value) results in strong signal
+    rf95.setTxPower(TXpower, false);
+    // rf95.setTxPower(20, true);
+    //  Set coding rate to the highest (4/8)
+    rf95.setCodingRate4(8); // 5 to 8. offers protection against bursts of interference, A higher CR offers more protection, but increases time on air.
+    // Set spreading factor to the highest (SF12)
+    rf95.setSpreadingFactor(12); // 6 to 12. A higher spreading factor increases the Signal to Noise Ratio (SNR), and thus sensitivity and range, but also increases the airtime of the packet. The number of chips per symbol is calculated as 2SF . For example, with an SF of 12 (SF12) 4096 chips/symbol are used. Each increase in SF halves the transmission rate and, hence, doubles transmission duration and ultimately energy consumption.
+    // Set bandwidth to the lowest (125 kHz). 15600 and 20800 Hz results in fun sounds to be heard on SDR
+    rf95.setSignalBandwidth(125000); // in Hz. Allowed range:7.8 to 500 kHz. typical 125,250 or 500 kHz. Higher BW gives a higher data rate (thus shorter time on air), but a lower sensitivity.  Lower BW also requires more accurate crystals (less ppm).
+    // Set the desired frequency @TODO-how to set for optimal range?
+    if (!rf95.setFrequency(frequency))
+    {
+      if (infoON)
+      {
+        Serial.println(F("Failed to set frequency!"));
+      }
+      worked = 0;
+    }
+
+    //@TODO- add setPayloadCRC(true); (this is default but needs testing), setPreambleLength(8)
+  } // end if(worked)
+
+  if (infoON)
+  {
+    Serial.println(F("RFM95 initialized."));
+    if (debug)
+    {
+      Serial.println(F("All device registers:"));
+      rf95.printRegisters();
+      Serial.println();
+    }
+    Serial.print(F("Device version from register 42:"));
+    Serial.println(rf95.getDeviceVersion());
+    Serial.print(F("nodeID set to:"));
+    Serial.println(nodeID);
+    //@TODO-consider printing other things like maxMessageLength() (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#ab273e242758e3cc2ed2679ef795a7196)
+  }
+
+  return worked;
 }
 
 boolean calibrateIMU()
@@ -423,106 +345,16 @@ boolean calibrateIMU()
   return successful;
 } // End calibrate IMU
 
-boolean setupRadio()
-{
-  /*
-  Starts the LoRa radio, reads from EEPROM for some settings (e.g. nodeID)
-  Returns: 1 if successful, 0 if failed
-  */
-
-  boolean worked = 1; // start at 1 and set to 0 if errors
-
-  //@TODO-put in function
-  // set the nodeID to value in EEPROM if one
-  if (!testEEPROMchecksum(nodeIdAddr) || forceChangeNodeID) // if the checksum is invalid or we are being forced to change nodeID, then set node ID to whatever was hard coded when firmware flashed, else read node ID from EEPROM
-  {
-    if (debug)
-    {
-      Serial.print(F("No nodeID found in EEPROM or forced update with forceChangeNodeID=TRUE. Setting NodeID to:"));
-      Serial.println(nodeID);
-      Serial.print(F("forceChangeNodeID value:"));
-      Serial.println(forceChangeNodeID);
-    }
-    writeDataWithChecksumToEEPROM(nodeIdAddr, nodeID);
-  }
-  else
-  {
-    EEPROM.get(nodeIdAddr, nodeID); // sets data to value here (also returns a refernece to data)
-    if (debug)
-    {
-      Serial.print(F("valid nodeID found in EEPROM, set my nodeID to:"));
-      Serial.println(nodeID);
-    }
-  }
-
-  // start RFM95 radio
-  if (!rf95.init())
-  {
-    if (infoON)
-    {
-      Serial.println(F("RFM95 initialization failed"));
-    }
-    worked = 0;
-  }
-
-  if (worked)
-  {
-    // Set RFM95 transmission parameters
-    // These 5 paramenter settings results in max range. The allowed values also come from this source (source:M. Bor and U. Roedig, “LoRa Transmission Parameter Selection,” in 2017 13th International Conference on Distributed Computing in Sensor Systems (DCOSS), Jun. 2017, pp. 27–34. doi: 10.1109/DCOSS.2017.10.)
-    // Note- some set functions do not return anything so don't need to check for sucess.
-
-    //  Set transmit power to the maximum (20 dBm), @TODO-double check docs for 2nd value. false is if PA_BOOST pin is used and true is RFO pin is used on RFM95 module
-    // seems like true (and any value) results in weak signal, false (and any value) results in strong signal
-    rf95.setTxPower(TXpower, false);
-    // rf95.setTxPower(20, true);
-    //  Set coding rate to the highest (4/8)
-    rf95.setCodingRate4(8); // 5 to 8. offers protection against bursts of interference, A higher CR offers more protection, but increases time on air.
-    // Set spreading factor to the highest (SF12)
-    rf95.setSpreadingFactor(12); // 6 to 12. A higher spreading factor increases the Signal to Noise Ratio (SNR), and thus sensitivity and range, but also increases the airtime of the packet. The number of chips per symbol is calculated as 2SF . For example, with an SF of 12 (SF12) 4096 chips/symbol are used. Each increase in SF halves the transmission rate and, hence, doubles transmission duration and ultimately energy consumption.
-    // Set bandwidth to the lowest (125 kHz). 15600 and 20800 Hz results in fun sounds to be heard on SDR
-    rf95.setSignalBandwidth(125000); // in Hz. Allowed range:7.8 to 500 kHz. typical 125,250 or 500 kHz. Higher BW gives a higher data rate (thus shorter time on air), but a lower sensitivity.  Lower BW also requires more accurate crystals (less ppm).
-    // Set the desired frequency @TODO-how to set for optimal range?
-    if (!rf95.setFrequency(frequency))
-    {
-      if (infoON)
-      {
-        Serial.println(F("Failed to set frequency!"));
-      }
-      worked = 0;
-    }
-
-    //@TODO- add setPayloadCRC(true); (this is default but needs testing), setPreambleLength(8)
-  } // end if(worked)
-
-  if (infoON)
-  {
-    Serial.println(F("RFM95 initialized."));
-    if (debug)
-    {
-      Serial.println(F("All device registers:"));
-      rf95.printRegisters();
-      Serial.println();
-    }
-    Serial.print(F("Device version from register 42:"));
-    Serial.println(rf95.getDeviceVersion());
-    Serial.print(F("nodeID set to:"));
-    Serial.println(nodeID);
-    //@TODO-consider printing other things like maxMessageLength() (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#ab273e242758e3cc2ed2679ef795a7196)
-  }
-
-  return worked;
-}
-
 byte checkJumperMode()
 {
   /*
   reads the pins for the jumpers, does stuff approiate for that mode (like turning on or off serial)
   returns mode (0=debug, 1=calibrate, 2=serial, 3=normal)
   Jumper modes:
-pins 4-5 bridged = debug (verbose serial output & LED on) & calibrate
-pins 5-6 bridged = calibrate
-pins 6-7 bridged = enable outputs like serial and LED (wastes power if not needed)
-no pins bridged = normal operation
+mode 0 (pins 4-5 bridged) = debug (verbose serial output & LED on) & calibrate
+mode 1 (pins 5-6 bridged) = calibrate (output is still enabled)
+mode 2 (pins 6-7 bridged) = enable outputs like serial and LED (wastes power if not needed)
+mode 3 (no pins bridged) = normal operation
   */
 
   byte mode = 3;
@@ -573,7 +405,7 @@ no pins bridged = normal operation
     break;
   case 1:
     // calibration
-    infoON = false; // print messages to serial and light LED, not needed if running on own.
+    infoON = true; // print messages to serial and light LED, not needed if running on own.
     debug = false;
     break;
   case 2:
@@ -583,7 +415,7 @@ no pins bridged = normal operation
     break;
   case 3:
     // normal
-    infoON = false; // print messages to serial and light LED, not needed if running on own.
+    infoON = false;
     debug = false;
     break;
   default:
@@ -592,7 +424,7 @@ no pins bridged = normal operation
   }
 
   if (oldInfoON != infoON)
-  { // we toggled state and need to do stuff
+  { // we toggled state and need to enable or disable output devices
     if (infoON)
     {
       Serial.begin(baudRate);
@@ -705,7 +537,7 @@ byte checkForACK(unsigned int msToWaitAfterSend)
   }
   rf95.waitPacketSent(); // wait if we are sending something else. Can't get an ACK if we are still sending.
 
-  //try rf95.setModeRx();
+  // try rf95.setModeRx();
   if (debug)
   {
     Serial.print(F("Done waiting. ms elapsed:"));
@@ -714,7 +546,7 @@ byte checkForACK(unsigned int msToWaitAfterSend)
     Serial.println(msToWaitAfterSend);
   }
 
-  //Try  rf95.isChannelActive();
+  // Try  rf95.isChannelActive();
   delay(msToWaitAfterSend);
   if (rf95.available())
   { // note- we need to delay because .available() returns true only if there is a new, complete, error free message
@@ -755,7 +587,6 @@ void IMUinterupt()
 
 void setup()
 {
-
   /*
    * Version history:
    * V1.0-initial
@@ -911,15 +742,15 @@ void setup()
   }
 
   //*******send a "node online" message so the other side knows we have a new "node time" for this nodeID, saying we have 255 motion events alerts the system that this is the "node just booted packet"
-//@TODO-calculate how long it takes to send an ACK using the given paramaters. datasheet is garbage but it seems to indicate the time is something like this:
-//Ts=(2^SF)/(BW(in kHz??)*1000)
-//Tpreable=(Lpreamble+4.25)*Ts Lpreamble default is 12
-//Tpayload=Ts*(8+ROUNDUP((8*Lpayload-4*SF+[implicit header=24, explicit=44])/(4*SF)))*(CR+4)
-//T on air=Tpreable+Tpayload
-//Assuming 20 km (lora abs max range) and speed of light 300,000 km/s 20÷300000=0.000066667 (66.7 us) one way max
-//for some reason, initial delay of 10000 doesn't work. 110 works but only on second transmit
+  //@TODO-calculate how long it takes to send an ACK using the given paramaters. datasheet is garbage but it seems to indicate the time is something like this:
+  // Ts=(2^SF)/(BW(in kHz??)*1000)
+  // Tpreable=(Lpreamble+4.25)*Ts Lpreamble default is 12
+  // Tpayload=Ts*(8+ROUNDUP((8*Lpayload-4*SF+[implicit header=24, explicit=44])/(4*SF)))*(CR+4)
+  // T on air=Tpreable+Tpayload
+  // Assuming 20 km (lora abs max range) and speed of light 300,000 km/s 20÷300000=0.000066667 (66.7 us) one way max
+  // for some reason, initial delay of 10000 doesn't work. 110 works but only on second transmit
   unsigned int timeToWaitForAck = 110; // time in ms we will wait for an ACK, after our message has sent. Trip time + rx delay + time on air + trip time
-  
+
   byte exitCodefromACK;
   do
   {
@@ -972,10 +803,9 @@ void setup()
 void loop()
 {
 
-//mimic sleep
-//if(rf95.sleep()){//good}
-//rf95.setModeTx(); or this maybe rf95.setModeIdle();
-
+  // mimic sleep
+  // if(rf95.sleep()){//good}
+  // rf95.setModeTx(); or this maybe rf95.setModeIdle();
 
   static unsigned long previousMillis = 0;
   if ((millis() - previousMillis) >= 10000)
