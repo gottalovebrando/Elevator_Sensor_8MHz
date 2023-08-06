@@ -12,6 +12,7 @@ extern bool infoON;
 //function signatures
 void fadeLED();
 void fadeLED(unsigned int number);
+void blinkLED(unsigned int number);
 void writeDataWithChecksumToEEPROM(int address, unsigned long data);
 bool testEEPROMchecksum(int address);
 void uncorrectableError(unsigned int errorNum);

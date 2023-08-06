@@ -34,7 +34,7 @@ int16_t minRawAcc;
 // #include <SPI.h> //SPI used by lora and flash chip
 #define RFM95_CS 10                      // chip select for SPI
 #define RFM95_INT 2                      // interupt pin
-unsigned long nodeID = 3;                // up to 2 million for lorawan?
+unsigned long nodeID = 4;                // up to 2 million for lorawan?
 const boolean forceChangeNodeID = false; // if you want to force the IMU to write this hard coded nodeID to EEPROM and use it. Only needed if you need to change it after it has been programmed
 float frequency = 904.0;                 // Specify the desired frequency in MHz
 // the transmit power in dB. -4 to 20 in 1 dB steps. NOTE-function itself seems to indicate a range of 2-20 dB or 0-15 dB @TODO-research
@@ -54,18 +54,76 @@ const int maxRawAccAddr = 16; // starting EEPROM address of the 2 bit max accele
 //*******************************************general global variables******************************************************
 bool debug = true;
 boolean infoON = true;             // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
-const unsigned int reserved = 1;   // can be used for other things later
+const unsigned int reserved = 1;   // sent with sensor tipe and firmware version, can be used for other things later
 const unsigned int sensorType = 2; // show what sensor type we are using (numbers tracked in other document)
 unsigned int firmwareVMajor;
 unsigned int firmwareVMinor;
-volatile unsigned long secondsSinceBoot = 0;   // seconds since boot or reset.
-volatile unsigned long motionLastDetectedTime; // variable that is written to in ISR and then stored to motionEvents array if conditions are met
+unsigned long motionLastDetectedTime;
+volatile bool motionInteruptTriggered = false; // variable that is written to in ISR
 unsigned long motionEvents[10] = {0};          // DO NOT CHANGE DATA TYPE WITHOUT EDITING CODE the array to store all the time stamps when motion was detected. 0 means ignore the value
 const unsigned int baudRate = 9600;
 const byte randSeedPin = A0; // pin we read from to get a random number to seed the random number generator. Could be removed if needed since the seed it set multiple times in setup
+const byte sleepT = 8;       // in seconds, the time we either simulate the microcontroller going to sleep or actually going to sleep
 //*******************************************END general global variables******************************************************
 
 //*******************************************functions******************************************************
+
+unsigned long updateAndGetSecsSinceBoot(byte wakeReason)
+{
+  // updates the secondsSinceBoot variable, does not work well when waking from interrupts
+  // counting seconds with a 32 bit unsigned long, (2^32) we should be able to track 4294967296÷60÷60÷24÷365=136.2 years
+  // MUST be called before going to sleep for first time with wakeReason 0. Must be called before sleeping with wakeReason0.
+  // MUST be called right after sleep or interupt wake
+  // wake reason 0=normal, 1=from sleep 2=from interupt
+
+  static unsigned long lastCallT = millis() / 1000;
+  static unsigned long secondsSinceBoot = millis() / 1000; // seconds since boot or reset.
+
+  // unsigned long seconds=millis()/1000; @TODO-is just having this value faster than recomputing it several times?
+
+  if ((lastCallT * 1000) > millis()) // GPT3.5-multiplication takes 2 clock cycles regardless of operand size. but div takes 22-42 clock cycles @TODO-check this
+  {                                  // our lastCallT should always be less than or equal to the current time. If not, millis() has overflowed
+    //@TODO-handle overflow of millis() better
+    lastCallT = 0; // Best we can do??
+    if (debug)
+    {
+      Serial.println(F("WARNING-Detected millis() overflow!"));
+    }
+  }
+
+  unsigned long old = secondsSinceBoot; //@TODO-delete
+  if (debug)
+  {
+    Serial.print(F("updateSecsSinceBoot():old SecsSinceBoot:"));
+    Serial.println(secondsSinceBoot);
+  }
+
+  switch (wakeReason)
+  {
+  case 0:                                                                  // normal function call so we can update our time with just the time elapsed since this function was last called
+    secondsSinceBoot = secondsSinceBoot + ((millis() / 1000) - lastCallT); //@TODO-which is faster, doing same operation twice or
+    break;
+  case 1: // woke from sleep so we know sleepT has elapassed
+    secondsSinceBoot = secondsSinceBoot + sleepT;
+    break;
+  case 2: // woke from an interupt so not sure how much time elapased, assume an average @TODO-find better way to update this
+    secondsSinceBoot = secondsSinceBoot + (sleepT / 2);
+    break;
+  default:
+    break;
+  }
+  lastCallT = millis() / 1000; // reset our timer
+
+  if (debug)
+  {
+    Serial.print(F("updateSecsSinceBoot():new SecsSinceBoot:"));
+    Serial.println(secondsSinceBoot);
+    Serial.print(F("updateSecsSinceBoot():elapsed:"));
+    Serial.println(secondsSinceBoot - old);
+  }
+
+  return secondsSinceBoot;
+}
 
 long readVcc()
 {
@@ -266,7 +324,7 @@ boolean calibrateIMU()
   totalAcc = accelgyro.getAccelerationX();
   minRawAcc = totalAcc;
   maxRawAcc = totalAcc;
-  long calibrationT = 102000;
+  unsigned long calibrationT = 102000;
   if (debug)
   {
     Serial.println(F("DEBUG-CalibrateIMU():shortening calibration time to 5s."));
@@ -310,6 +368,7 @@ boolean calibrateIMU()
     Serial.print(maxRawAcc);
     Serial.print(F(", Min set to:"));
     Serial.println(minRawAcc);
+    fadeLED(7);
   }
 
   // write these values to EEPROM
@@ -464,9 +523,9 @@ byte countMotionEvents()
   return count;
 }
 
-byte sendNodeInfoRadioPacket(unsigned int numEvents)
+byte sendNodeInfoRadioPacket(unsigned int numEvents, unsigned long lastMotionTime)
 {
-  // this sends the header packet that has the node infromation
+  // sends a radio packet with the number of motion events and the timestamp of the last motion time (in seconds)
   // returns 0 if it worked, 1 if there was a problem with creating the message buffer to send (currently only if debug=true), 2 if problem with send() method
 
   byte exitCode = 0;
@@ -476,9 +535,9 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents)
   char garbage[1];
   int lengthNeeded; // number of characters that would have been written if message had been sufficiently large, not counting the terminating null character.
   // format specifiers:%lu for unsigned long, %ld for long, %d for integers (decimal format), %f for floating-point numbers (floating-point format), %c for characters, %s for strings
-  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
-  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                 // normally needs ~14 characters
-  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                                     // normally needs ~14 characters
+  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
   if (debug)
   {
     Serial.print(F("chars needed to write message (I added 1 for null char):"));
@@ -486,7 +545,7 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents)
     Serial.print(F("Size of message--SIZEOF() EDITION WOWWW:"));
     Serial.println(sizeof(message));
   }
-  if ((lengthNeeded + 1) > (sizeof(message) / sizeof(char)))
+  if ((unsigned long)(lengthNeeded + 1) > (sizeof(message) / sizeof(char)))
   { // truncated message alert!
     if (infoON)
     {
@@ -502,8 +561,7 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents)
   {
     Serial.print(F("Sending data:"));
     Serial.println(message);
-    // fadeLED(counter); // blink the LED a certain number of times before sending message.
-    digitalWrite(LED_BUILTIN, HIGH); // turn on LED to indicate radio is on
+    fadeLED(4);
   }
   // wait if there is another packet already sending, not really neeed since send() does this anyway
   rf95.waitPacketSent();
@@ -511,9 +569,9 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents)
   {
     exitCode = 2;
   }
+  // rf95.waitPacketSent(); //this just adds useless delay
   if (infoON)
   {
-    digitalWrite(LED_BUILTIN, LOW);
     Serial.println(F("Packet is either being sent (& will finish soon) or is already sent."));
   }
 
@@ -533,21 +591,39 @@ byte checkForACK(unsigned int msToWaitAfterSend)
   unsigned long startT = millis(); //@TODO-remove this
   if (debug)
   {
-    Serial.print(F("checkForAck():Waiting to finish sending..."));
+    Serial.print(F("checkForAck():Wait to finish send (if sending)..."));
   }
   rf95.waitPacketSent(); // wait if we are sending something else. Can't get an ACK if we are still sending.
 
-  // try rf95.setModeRx();
   if (debug)
   {
     Serial.print(F("Done waiting. ms elapsed:"));
     Serial.println(millis() - startT);
-    Serial.print(F("checkForAck():delaying:"));
+    Serial.print(F("checkForAck():now waiting for ACK. using waitCAD and delaying:"));
     Serial.println(msToWaitAfterSend);
   }
-
-  // Try  rf95.isChannelActive();
+  startT = millis();
   delay(msToWaitAfterSend);
+  /*This caused program to hang on the 4th call of this function
+  rf95.setModeRx();
+  delay(msToWaitAfterSend);
+  while (rf95.isChannelActive())
+  {
+    if (debug)
+    {
+      Serial.println(F("checkForAck(): being held by isChannelActive()"));
+      delay(1);
+    }
+  }
+  */
+  rf95.waitCAD();
+  delay(50); //@TODO- what time is reasonable to give it time to process ACK?
+  if (debug)
+  {
+
+    Serial.print(F("checkForAck():Done waiting to RX ACK, checking now. ms elapsed:"));
+    Serial.println(millis() - startT);
+  }
   if (rf95.available())
   { // note- we need to delay because .available() returns true only if there is a new, complete, error free message
     uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
@@ -575,12 +651,197 @@ byte checkForACK(unsigned int msToWaitAfterSend)
   return exitCode;
 }
 
+byte sendNodeInfoRadioPacketWithACK(byte triesToAttempt, unsigned int numEvents, unsigned long lastMotionTime)
+{
+
+  //@TODO-consider returning the exit code from the ACK plus exit code from send?
+  // send a packet with the specified number of attempts to try 0=try forever
+  // returns 0 if all good, 1 if an error sending, 2 if error receiving
+
+  //@TODO-this method is not reliable to get ACKs. calculate how long it takes to send an ACK using the given paramaters. datasheet is garbage but it seems to indicate the time is something like this:
+  // Ts=(2^SF)/(BW(in kHz??)*1000)
+  // Tpreable=(Lpreamble+4.25)*Ts Lpreamble default is 12
+  // Tpayload=Ts*(8+ROUNDUP((8*Lpayload-4*SF+[implicit header=24, explicit=44])/(4*SF)))*(CR+4)
+  // T on air=Tpreable+Tpayload
+  // Assuming 20 km (lora abs max range) and speed of light 300,000 km/s 20÷300000=0.000066667 (66.7 us) one way max
+  // for some reason, initial delay of 10000 doesn't work. 110 works but only on second transmit
+  unsigned int timeToWaitForAck = 101; // time in ms we will wait for an ACK, after our message has sent. Trip time + rx delay + time on air + trip time
+
+  bool decrement = true;
+  if (triesToAttempt == 0)
+  { // turn off decrementing and set the tries to 1.
+    decrement = false;
+    triesToAttempt = 1;
+  }
+
+  byte exitCodefromACK;
+  byte triesForACK = triesToAttempt;
+
+  // my hackey attemtp to try to clear the receive buffer
+  exitCodefromACK = checkForACK(0);
+  if (debug)
+  {
+    Serial.print(F("Try to clear RX buffer. exitCodefromACK:"));
+    Serial.println(exitCodefromACK);
+  }
+  exitCodefromACK = checkForACK(0);
+  if (debug)
+  {
+    Serial.print(F("Try to clear RX buffer. exitCodefromACK:"));
+    Serial.println(exitCodefromACK);
+  }
+
+  do // while loop for send, wait for ACK
+  {
+    byte triesToSend = triesToAttempt; // reset the tries to send
+    byte exitCodeSend;
+    do // while loop for attempt to send. Should not really ever get an exit code != 0 but just in case
+    {
+      exitCodeSend = sendNodeInfoRadioPacket(numEvents, lastMotionTime);
+      if (decrement)
+      {
+        triesToSend--;
+      }
+      if (debug)
+      {
+        Serial.print(F("triesToSend:"));
+        Serial.println(triesToSend);
+        Serial.print(F("exitCodeSend:"));
+        Serial.println(exitCodeSend);
+      }
+    } while (triesToSend && (exitCodeSend != 0)); // while we still have tries remaining and we did not get an exit code of 0 (success)
+    if (exitCodeSend != 0)
+    { // if we don't get success back from this after we tried, then we had some problem sending that we can't fix
+      return 1;
+    }
+
+    // now look for an ACK
+    exitCodefromACK = checkForACK(timeToWaitForAck); //@TODO-change behavior here to handle no message received at all vs message received but not ACK
+    if (decrement)
+    {
+      triesForACK--;
+    }
+    if (exitCodefromACK != 0) // if we didn't get an ACK, increase the time we wait and also delay a random amount of time before trying to send again
+    {
+      timeToWaitForAck = timeToWaitForAck + 1; //@TODO-determine how much time to wait better
+      if (infoON)
+      {
+        Serial.print(F("No ACK received. Tries remaining:"));
+        Serial.print(triesForACK);
+        Serial.print(F(". New ms to wait for ACK:"));
+        Serial.println(timeToWaitForAck);
+        fadeLED(5);
+      }
+      if (triesForACK)
+      {                             // if we still have tries remaining, delay some and send again
+        delay(random(1000, 10000)); // wait a random ammount of time within a certain range of ms. @TODO-write code to calculate how long it takes to send ACK, given current TX params and set this as minimum
+      }
+    }
+
+    if (debug)
+    {
+      Serial.print(F("exitCodefromACK:"));
+      Serial.println(exitCodefromACK);
+      Serial.print(F("triesForACK:"));
+      Serial.println(triesForACK);
+    }
+  } while (triesForACK && (exitCodefromACK != 0)); // keep trying if we still have tries remaining & did not get an ACK
+
+  if ((exitCodefromACK != 0))
+  { // if we don't get success back from this after we tried & tried, then we had some problem receving the ACK
+    if (infoON)
+    {
+      Serial.println(F("Tries exausted with no ACK. Giving up."));
+    }
+    return 2;
+  }
+  else
+  {
+    if (infoON)
+    {
+      Serial.println(F("ACK received!"));
+      fadeLED(3);
+    }
+    return 0;
+  }
+}
+
+byte checkAccelInRangeForT(int32_t upper_limit, int32_t lower_limit, uint32_t time_in_range_ms, uint32_t timeout_ms)
+{
+  // #include <stdbool.h>
+  // #include <stdint.h>
+
+  // Function to check if a variable remains above a certain number or below a certain number
+  // for a specified period of time.
+  // Parameters:
+  //   upper_limit: The upper limit to check if the variable is above this number.
+  //   lower_limit: The lower limit to check if the variable is below this number.
+  //   time_in_range_ms: The time in milliseconds that the variable must remain within the limits.
+  //   timeout_ms: The timeout period in milliseconds.
+
+  // Returns:
+  //   0 if there was a timeout
+  //   1 if the variable remained above 'upper_limit',
+  //   2 if the variable remained below 'lower_limit'.
+
+  unsigned int delay_us = 1000; // The delay between IMU reads in microseconds. Note that per data sheet max sample rate is 1000 Hz
+  uint32_t startTime = millis();
+
+  bool inRangePreviously = false;
+  uint32_t timeInLimit = 0;
+
+  while ((millis() - startTime) < timeout_ms)
+  {
+    int16_t totalAcc = long(accelgyro.getAccelerationX());
+
+    if ((totalAcc < upper_limit) && (totalAcc > lower_limit))
+    {
+      inRangePreviously = false;
+      timeInLimit = 0;
+    }
+    else if (!inRangePreviously) // If the variable is back within the range, reset the timer.
+    {
+      inRangePreviously = true;
+      timeInLimit = 0;
+    }
+
+    if (inRangePreviously)
+    {
+      timeInLimit += (delay_us / 1000);
+      if (debug)
+      {
+        Serial.print(F("in range. timeInLimit:"));
+        Serial.println(timeInLimit);
+      }
+      if (timeInLimit >= time_in_range_ms)
+      {
+        if (totalAcc > upper_limit)
+        {
+          return 1; // 'totalAcc' remained above 'upper_limit' for the specified time period.
+        }
+        else if (totalAcc < lower_limit)
+        {
+          return 2; // 'totalAcc' remained below 'lower_limit' for the specified time period.
+        }
+      }
+    }
+
+    static unsigned long previousdelayT = micros();
+    while ((micros() - previousdelayT) < delay_us)
+    { // while elapsed time is less than the delay, wait
+    }
+    previousdelayT = micros(); // reset
+    // delay(delay_us/1000));
+  }
+
+  return 0; // Timeout occurred, the variable did not remain above 'upper_limit' or below 'lower_limit' for the specified time period.
+}
+
 // ISR function to handle a motion interupt from IMU
 void IMUinterupt()
 {
-  // Perform quick and simple tasks only inside an ISR to keep it fast
-  // Avoid using Serial communication or complex operations here
-  motionLastDetectedTime = secondsSinceBoot;
+  // Perform quick and simple tasks only inside an ISR to keep it fast. Avoid using Serial communication or complex operations here
+  motionInteruptTriggered = true;
 }
 
 //*******************************************END functions******************************************************
@@ -590,6 +851,7 @@ void setup()
   /*
    * Version history:
    * V1.0-initial
+   * V1.1-major revisions to packet structure
    *
    * @TODO:
    * allow changing of nodeID somehow (serial or from radio?)
@@ -597,7 +859,7 @@ void setup()
    * switch all methods to return exit codes instead of boolean
    */
   firmwareVMajor = 1;
-  firmwareVMinor = 0;
+  firmwareVMinor = 1;
 
   Serial.begin(baudRate);
   Serial.println();
@@ -617,17 +879,7 @@ void setup()
   // Pin setup & RNG setup
   // Note according to (http://www.gammon.com.au/power), power consumption is the same if INPUT or OUTPUT. Thing that matters is internal pullups. If must be high, INPUT preferred
   pinMode(LED_BUILTIN, OUTPUT);
-  if (debug)
-  {
-    Serial.println(F("blink LED..."));
-  }
-  for (byte i = 0; i < 5; i++) // blink LED a little
-  {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(300);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(300);
-  }
+  fadeLED(5);
   unsigned long randSeed = analogRead(randSeedPin);
   randomSeed(randSeed);
   if (debug)
@@ -636,7 +888,7 @@ void setup()
     Serial.println(randSeed);
   }
 
-  // initilize hardware and throw errors if a failure
+  // initilize hardware and call error method if a failure
   if (!setupIMU())
   {
     uncorrectableError(1);
@@ -664,8 +916,7 @@ void setup()
   {
     if (debug)
     {
-      Serial.println(F("EEPROM data invalid at address below (according to checksum). (Its value also below)."));
-      Serial.print(F("EEPROM Address in question:"));
+      Serial.print(F("EEPROM data invalid at address:"));
       Serial.println(tempAddr);
     }
     uncorrectableError(4);
@@ -741,48 +992,19 @@ void setup()
     Serial.println(maxRawAcc);
   }
 
-  //*******send a "node online" message so the other side knows we have a new "node time" for this nodeID, saying we have 255 motion events alerts the system that this is the "node just booted packet"
-  //@TODO-calculate how long it takes to send an ACK using the given paramaters. datasheet is garbage but it seems to indicate the time is something like this:
-  // Ts=(2^SF)/(BW(in kHz??)*1000)
-  // Tpreable=(Lpreamble+4.25)*Ts Lpreamble default is 12
-  // Tpayload=Ts*(8+ROUNDUP((8*Lpayload-4*SF+[implicit header=24, explicit=44])/(4*SF)))*(CR+4)
-  // T on air=Tpreable+Tpayload
-  // Assuming 20 km (lora abs max range) and speed of light 300,000 km/s 20÷300000=0.000066667 (66.7 us) one way max
-  // for some reason, initial delay of 10000 doesn't work. 110 works but only on second transmit
-  unsigned int timeToWaitForAck = 110; // time in ms we will wait for an ACK, after our message has sent. Trip time + rx delay + time on air + trip time
-
-  byte exitCodefromACK;
-  do
+  //*******send a "new node online" message so the other side is aware of this nodeID's time, try 255 times. When we say we have 2^16-1 motion events, it alerts the other side this is a "new node online" packet
+  // if (sendNodeInfoRadioPacketWithACK(255, 65535, updateAndGetSecsSinceBoot(0)) != 0) //@TODO-refresh seconds time each time it sends
+  if (sendNodeInfoRadioPacketWithACK(255, 65535, updateAndGetSecsSinceBoot(0)) != 0) //@TODO-refresh seconds time each time it sends
   {
-    if (sendNodeInfoRadioPacket(255) != 0)
-    { // if we don't get success back from this, then we had some problem sending that we can't fix
-      uncorrectableError(6);
-    }
-    exitCodefromACK = checkForACK(timeToWaitForAck); //@TODO-change behavior here to handle no message received at all vs message received but not ACK
-    if (debug)
-    {
-      Serial.print(F("exitCodefromACK:"));
-      Serial.println(exitCodefromACK);
-    }
-    if (exitCodefromACK != 0) // if we didn't get an ACK, increase the time we wait and also delay a random amount of time before trying to send again
-    {
-      timeToWaitForAck = timeToWaitForAck + 50; //@TODO-determine how much time to wait better
-      if (infoON)
-      {
-        Serial.print(F("No ACK received within timeout. Trying again. New timeout:"));
-        Serial.println(timeToWaitForAck);
-      }
-      // delay(timeToWaitForAck);
-      delay(random(1000, 10000)); // wait a random ammount of time within a certain range of ms. @TODO-write code to calculate how long it takes to send ACK, given current TX params and set this as minimum
-    }
-  } while (exitCodefromACK != 0); // keep trying if we did not get an ACK @TODO-add a timeout value here also and call uncorrectable error
+    uncorrectableError(6);
+  }
 
   // set the IMU interupt for the motion thesholds we either read from EEPROM or calibrated (@TODO-will set interupt in next version of program)
   // pinMode(interruptPin, INPUT_PULLUP); // Set pin 3 as an input with internal pull-up
   // attachInterrupt(digitalPinToInterrupt(interruptPin), detectRisingSignal, FALLING); @TODO-check if the IMU is RISING FALLING or what
 
   // setup should take such a variable amount of time, this should be good
-  randSeed = micros(); // unsigned long
+  randSeed = micros() + random(); // unsigned long
   randomSeed(randSeed);
   if (debug)
   {
@@ -792,65 +1014,192 @@ void setup()
 
   if (infoON)
   {
-    Serial.println();
-    Serial.println();
-    Serial.println(F("****Setup complete!****"));
-    Serial.println();
-    Serial.println();
+    Serial.println(F("\n\nSetup complete! Begin motion monitoring...\n\n"));
+    fadeLED(6);
   }
+
+  updateAndGetSecsSinceBoot(0); // last time we know millis() will be accurate
 } // end setup
 
 void loop()
 {
 
-  // mimic sleep
-  // if(rf95.sleep()){//good}
-  // rf95.setModeTx(); or this maybe rf95.setModeIdle();
+  static unsigned int motionEvents = 0; // the number of motion events
 
-  static unsigned long previousMillis = 0;
-  if ((millis() - previousMillis) >= 10000)
-  {                            // check after a delay because this consumes power. 300000 ms = 5 min
-    previousMillis = millis(); // Reset the timer, not precise
+  // ************put things to sleep to save power
+  if (!rf95.sleep()) // good if sucessful at putting radio to sleep, but doesn't really matter right now if it didn't go to sleep
+  {
+    if (debug)
+    {
+      Serial.println(F("WARNING-problem putting radio to sleep"));
+    }
+    //@TODO-maybe send a packet out with an error?
+  }
+  // put IMU to low power?
+  // simulate microcontroller sleeping for sleepT
+  unsigned long sleepStartT = millis();
+  do
+  {
+    /*
+    //if using the functions requiring pointers
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  */
+    // int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
+    int16_t totalAcc = long(accelgyro.getAccelerationX());
+    if ((totalAcc > maxRawAcc) || (totalAcc < minRawAcc))
+    {
+      IMUinterupt();
+      if (infoON)
+      {
+        Serial.println(F("------motion threshold triggered------"));
+        if (totalAcc < minRawAcc)
+        {
+          Serial.print(F("Went below minRawAcc (which is "));
+          Serial.print(minRawAcc);
+          Serial.print(F(") Value was:"));
+          Serial.println(totalAcc);
+        }
+        if (totalAcc > maxRawAcc)
+        {
+          Serial.print(F("Went above maxRawAcc (which is "));
+          Serial.print(maxRawAcc);
+          Serial.print(F(") Value was:"));
+          Serial.println(totalAcc);
+        }
+      }
+    }
+    delayMicroseconds(3150);                                                            // from IMU_Zero example in MPU6050 library
+  } while ((!motionInteruptTriggered) && ((millis() - sleepStartT) < (sleepT * 1000))); // continue loop if we didn't trigger motion int & time elapsed is less than the sleep time
+  // code will start here when wake from sleep
+  if (motionInteruptTriggered)
+  {
+    updateAndGetSecsSinceBoot(2); // call this telling it we woke from an interrupt
+  }
+  else
+  {
+    updateAndGetSecsSinceBoot(1); // call this if we work up from sleep after timeout
+  }
+
+  //********check to see if we woke up to the elevator moving or just nonsense
+  bool elevatorMoved = false;
+  if (motionInteruptTriggered)
+  {
+    //@TODO-do we want to warm up radio here? "Caution: there is a time penalty as the radio takes a finite time to wake from sleep mode." (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#a6f4fef2a1f40e704055bff09799f08cf)
+    //rf95.setModeIdle();
+    // disable interupt from IMU (NOT FOR RADIO)
+    if (false)
+    {
+      elevatorMoved = true; // for debug, treat all triggers as motion
+    }
+    else // actually check to see if elevator is moving
+    {
+      unsigned int miniumElevatorAccTime = 500;   // in ms, time elevator is above deadband of acceleromenter, continiously, min value of all trials
+      unsigned int elevatorAccTime = 3000;        // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
+      unsigned int maxElevatorTravelTime = 15000; // in ms, time it takes elevator to transit, max value of all trials
+      //@TODO-get this to record the times and actual max/min values or delete these times if not used
+      unsigned long startMot1T = updateAndGetSecsSinceBoot(0);
+      if (debug)
+      {
+        Serial.println(F("Begin motion1"));
+      }
+      byte motion1 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, elevatorAccTime); // must be above or below threshold for 500 ms, timeout=3000 ms @TODO-check
+      if (infoON)
+      { // give indicator if we sensed motion
+        if (motion1)
+        {
+          fadeLED(motion1);
+          Serial.println(F("Elevator acceleration or decel sensed, "));
+          Serial.print(F("motion1 result:"));
+          Serial.println(motion1);
+        }
+        else
+        {
+          Serial.println(F("Timeoout. No elevator motion sensed."));
+        }
+      }
+      //@TODO-skip the rest if we time out on the first
+      unsigned long startMot2T = updateAndGetSecsSinceBoot(0);
+      byte motion2 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, maxElevatorTravelTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
+      if (infoON)
+      {
+        if (motion2)
+        {
+          fadeLED(motion2);
+          Serial.print(F("Elevator acceleration or decel sensed, "));
+          Serial.print(F("motion2 result:"));
+          Serial.println(motion2);
+        }
+        else
+        {
+          Serial.println(F("Timeoout. No elevator motion sensed."));
+        }
+      }
+      unsigned long endMot2T = updateAndGetSecsSinceBoot(0);
+
+      if (motion1 * motion2 == 2)
+      { // only a up (1) and then down (2) or a down (2) then up (1) will give output of 2 here
+        elevatorMoved = true;
+      }
+    } // end if(!debug) statement
+
+    motionInteruptTriggered = false; // reset
+  }                                  // end if motionInteruptTriggered
+
+  if (elevatorMoved)
+  {
+    //def need to warm up radio from sleep now. "Caution: there is a time penalty as the radio takes a finite time to wake from sleep mode." (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#a6f4fef2a1f40e704055bff09799f08cf)
+    rf95.setModeIdle();
+    motionLastDetectedTime = updateAndGetSecsSinceBoot(0);
+    motionEvents++;
+    if (motionEvents == 65535)
+    {                       // 65535 value is reserved for the when the node first comes online, so set to below that before sending
+      motionEvents = 65534; // this will tell base station we are in an overflow condition
+    }
+    //*********the elvator was moving, send the radio packet
+    if (sendNodeInfoRadioPacketWithACK(4, motionEvents, motionLastDetectedTime) == 0) // try to send 4 times @TODO-determine best behavior for this
+    {
+      motionEvents = 0; // reset these if we get an ACK
+      motionLastDetectedTime = 0;
+    }
+
+    elevatorMoved = false; // reset
+  }
+  // enable interupt on IMU
+
+  //*****do stuff at certain time intervals.
+  // check the jumpers to see if mode changed. consumes power to set pullup resistors so limit this.
+  static unsigned long prevCheckModeT = updateAndGetSecsSinceBoot(0);
+  if ((updateAndGetSecsSinceBoot(0) - prevCheckModeT) > 60)
+  {
     if (debug)
     {
       Serial.println(F("Checking jumper mode."));
     }
     checkJumperMode();
+    prevCheckModeT = updateAndGetSecsSinceBoot(0); // Reset the timer
   }
-
-  /******************************** IMU stuff
-  /*
-  //if using the functions requiring pointers
-int16_t ax, ay, az;
-int16_t gx, gy, gz;
-  accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-*/
-
-  // int16_t totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
-  int16_t totalAcc = long(accelgyro.getAccelerationX());
-
-  //@TODO-replace this with sleep and intterupt code.
-  if ((totalAcc > maxRawAcc) || (totalAcc < minRawAcc))
+  // send a radio status message if its been long enough
+  static unsigned long prevSendInfoT = updateAndGetSecsSinceBoot(0);
+  static unsigned int sendInfoIntervalT = 3600;                           // send the first info packet after an hour
+  if ((updateAndGetSecsSinceBoot(0) - prevSendInfoT) > sendInfoIntervalT) // send a radio packet at a defined interval, with some randomness introduced
   {
-    if (infoON)
+    if (sendNodeInfoRadioPacketWithACK(1, motionEvents, motionLastDetectedTime) == 0) // try to send 1 time @TODO-determine best behavior for this
     {
-      Serial.print(F("Motion detected! "));
-      if (totalAcc < minRawAcc)
-      {
-        Serial.print(F("Went below minRawAcc (which is "));
-        Serial.print(minRawAcc);
-        Serial.print(F(") Value was:"));
-        Serial.println(totalAcc);
-      }
-      if (totalAcc > maxRawAcc)
-      {
-        Serial.print(F("Went above maxRawAcc (which is "));
-        Serial.print(maxRawAcc);
-        Serial.print(F(") Value was:"));
-        Serial.println(totalAcc);
-      }
+      motionEvents = 0; // reset these if we get an ACK
+      motionLastDetectedTime = 0;
+    }
+
+    prevSendInfoT = updateAndGetSecsSinceBoot(0);    // Reset the timer, not precise
+    sendInfoIntervalT = 21600 + random(-3600, 3600); // set a new random time to wait. 21600 is 4 times a day (6 hours)
+    if (debug)
+    {
+      Serial.print(F("Sending a info packet. Would be new semi-random interval to wait (but debug mode forces 60s):"));
+      Serial.println(sendInfoIntervalT);
+      sendInfoIntervalT = 60; // force this to send every min
     }
   }
 
-  delayMicroseconds(3150); // from IMU_Zero example in MPU6050 library
+  updateAndGetSecsSinceBoot(0); // update before we go to sleep
 } // end loop

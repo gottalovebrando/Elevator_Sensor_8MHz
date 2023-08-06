@@ -1,11 +1,10 @@
-#include "moteino_shared_functions.h"  // custom functions for this project
-//other libs needed
+#include "moteino_shared_functions.h" // custom functions for this project
+// other libs needed
 #include <Arduino.h>
 #include <EEPROM.h>
 
-
 void fadeLED()
-{//fades LED once
+{ // fades LED once
   delay(100);
   // NOTE-fade value needs to be int or it will get stuck, depending if fadeSpeed%255==0 or not
   byte fadeSpeed = 40;
@@ -24,6 +23,25 @@ void fadeLED()
   }
   digitalWrite(LED_BUILTIN, LOW);
   delay(100);
+}
+
+void blinkLED(unsigned int number)
+{
+  if (debug)
+  {
+    Serial.print(F("blink LED X"));
+    Serial.println(number);
+  }
+
+  delay(700);
+  for (unsigned int i = 0; i < number; i++) // blink
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(300);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(300);
+  }
+  delay(700);
 }
 
 void fadeLED(unsigned int number)
@@ -78,8 +96,9 @@ void uncorrectableError(unsigned int errorNum)
   4-invalid EEPROM data for minRawAcc
   5-invalid EEPROM data for maxRawAcc
   6-error sending the initial radio packet
+  7-
   */
-  //@TODO-add switch to just create error message from error number
+  //@TODO-add switch to create error message from error number
   // swtich(errorNum)
   // const char *errorMessage
 
@@ -97,32 +116,10 @@ void uncorrectableError(unsigned int errorNum)
       Serial.println('\n');
       // Serial.println(F(". Error message:"));
       // Serial.println(errorMessage);
+      delay(1000);
+      blinkLED(errorNum);
+      delay(1000);
     }
-    for (unsigned int i = 0; i < errorNum; i++) // blink
-    {
-      digitalWrite(LED_BUILTIN, HIGH); // Turn the LED on
-      delay(500);                      // Wait for half a second (500 milliseconds)
-      digitalWrite(LED_BUILTIN, LOW);  // Turn the LED off
-      delay(500);                      // Wait for half a second (500 milliseconds)
-    }
-    delay(500);
-    // fade in from min to max
-    for (byte fadeValue = 0; fadeValue <= 255; fadeValue += 1)
-    {
-      // sets the value (range from 0 to 255):
-      analogWrite(LED_BUILTIN, fadeValue);
-      // wait for 30 milliseconds to see the dimming effect
-      delay(30);
-    }
-    // fade out from max to min
-    for (byte fadeValue = 255; fadeValue >= 0; fadeValue -= 1)
-    {
-      // sets the value (range from 0 to 255):
-      analogWrite(LED_BUILTIN, fadeValue);
-      // wait for 30 milliseconds to see the dimming effect
-      delay(30);
-    }
-    delay(500);
   }
 }
 
