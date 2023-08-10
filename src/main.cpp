@@ -327,23 +327,6 @@ boolean calibrateIMU()
     fadeLED(10); // fade the LED to warn user not to touch
   }
 
-  if (debug)
-  {
-    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
-    Serial.println(F("time (ms),x,y,z"));
-    for (unsigned int i = 0; i < 10000; i++)
-    { // max iterations for unsigned long is 4294967295
-      char delim = ',';
-      Serial.print(millis());
-      Serial.print(delim);
-      Serial.print(accelgyro.getAccelerationX());
-      Serial.print(delim);
-      Serial.print(accelgyro.getAccelerationY());
-      Serial.print(delim);
-      Serial.println(accelgyro.getAccelerationZ());
-    }
-  }
-
   // actually start calibration
   if (infoON)
   {
@@ -357,11 +340,13 @@ boolean calibrateIMU()
   minRawAcc = totalAcc;
   maxRawAcc = totalAcc;
   unsigned long calibrationT = 102000;
-  if (debug)
+  /*
+  if (debug && false)
   {
     Serial.println(F("DEBUG-CalibrateIMU():shortening calibration time to 5s."));
     calibrationT = 1000;
   }
+  */
   while ((millis() - startT) < calibrationT) // collect max and min for 1.7 mins (102000 ms)
   {
     // totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
@@ -849,11 +834,11 @@ byte checkAccelInRangeForT(int32_t upper_limit, int32_t lower_limit, uint32_t ti
       timeInLimit += (delay_us / 1000); //@TODO-get rid of this division here!!
       if (debug)
       {
-        //Serial.print(F("timeInLimit:"));
-        //Serial.println(timeInLimit);
-        digitalWrite(LED_BUILTIN,HIGH);
+        // Serial.print(F("timeInLimit:"));
+        // Serial.println(timeInLimit);
+        digitalWrite(LED_BUILTIN, HIGH);
         delayMicroseconds(50);
-        digitalWrite(LED_BUILTIN,LOW);
+        digitalWrite(LED_BUILTIN, LOW);
       }
       if (timeInLimit >= time_in_range_ms)
       {
@@ -933,6 +918,24 @@ void setup()
   {
     uncorrectableError(1);
   }
+
+  if (debug)
+  {
+    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
+    Serial.println(F("time (ms),x,y,z"));
+    for (unsigned int i = 0; i < 10000; i++)
+    { // max iterations for unsigned long is 4294967295
+      char delim = ',';
+      Serial.print(millis());
+      Serial.print(delim);
+      Serial.print(accelgyro.getAccelerationX());
+      Serial.print(delim);
+      Serial.print(accelgyro.getAccelerationY());
+      Serial.print(delim);
+      Serial.println(accelgyro.getAccelerationZ());
+    }
+  }
+
   if (!setupRadio())
   {
     uncorrectableError(2);
@@ -1150,7 +1153,7 @@ setSleepEnabled(false);
     //@TODO-change some to unsigned long
     unsigned int miniumElevatorAccTime = 10; // in ms, time elevator is outside the deadband of acceleromenter (continiously), min value of all trials
     unsigned int elevatorAccTime = 1000;     // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
-    unsigned int minTimeBetweenAcc = 50;    // in ms, time the elevator takes between acceleration and deceleration, min value of all trials
+    unsigned int minTimeBetweenAcc = 50;     // in ms, time the elevator takes between acceleration and deceleration, min value of all trials
     unsigned int maxDoorToDoorTime = 16000;  // in ms, time it takes elevator to transit from top to bottom or bottom to top (in practce this could be the max time between the end of initial acceleraton and the end of decelleraton), max value of all trials
     byte motion1 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
     byte motion2 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
