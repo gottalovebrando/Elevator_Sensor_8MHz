@@ -34,7 +34,7 @@ int16_t minRawAcc;
 // #include <SPI.h> //SPI used by lora and flash chip
 #define RFM95_CS 10                      // chip select for SPI
 #define RFM95_INT 2                      // interupt pin
-unsigned long nodeID = 4;                // up to 2 million for lorawan?
+unsigned long nodeID = 5;                // up to 2 million for lorawan?
 const boolean forceChangeNodeID = false; // if you want to force the IMU to write this hard coded nodeID to EEPROM and use it. Only needed if you need to change it after it has been programmed
 float frequency = 904.0;                 // Specify the desired frequency in MHz
 // the transmit power in dB. -4 to 20 in 1 dB steps. NOTE-function itself seems to indicate a range of 2-20 dB or 0-15 dB @TODO-research
@@ -53,9 +53,14 @@ const int maxRawAccAddr = 16; // starting EEPROM address of the 2 bit max accele
 
 //*******************************************general global variables******************************************************
 bool debug = true;
-boolean infoON = true;             // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
-const unsigned int reserved = 1;   // sent with sensor tipe and firmware version, can be used for other things later
-const unsigned int sensorType = 2; // show what sensor type we are using (numbers tracked in other document)
+unsigned int motionInteruptWakupCount = 0; // for debugging, @TODO-delete
+byte lastMotion1 = 0;                      // for debugging, @TODO-delete
+byte lastMotion2 = 0;                      // for debugging, @TODO-delete
+unsigned int motionEventOneCount = 0;      // for debugging, @TODO-delete
+unsigned int motionEventTwoCount = 0;      // for debugging, @TODO-delete
+boolean infoON = true;                     // print messages to serial and light LED, not needed if running on own. The device ignores this for first part of setup so that important error messages are always available on serial
+unsigned int messageType = 1;              // sent with sensor type and firmware version
+const unsigned int sensorType = 2;         // show what sensor type we are using (numbers tracked in other document)
 unsigned int firmwareVMajor;
 unsigned int firmwareVMinor;
 unsigned long motionLastDetectedTime;
@@ -92,7 +97,7 @@ unsigned long updateAndGetSecsSinceBoot(byte wakeReason)
   }
 
   unsigned long old = secondsSinceBoot; //@TODO-delete
-  if (debug)
+  if (debug && false)
   {
     Serial.print(F("updateSecsSinceBoot():old SecsSinceBoot:"));
     Serial.println(secondsSinceBoot);
@@ -114,7 +119,7 @@ unsigned long updateAndGetSecsSinceBoot(byte wakeReason)
   }
   lastCallT = millis() / 1000; // reset our timer
 
-  if (debug)
+  if (debug && false)
   {
     Serial.print(F("updateSecsSinceBoot():new SecsSinceBoot:"));
     Serial.println(secondsSinceBoot);
@@ -168,22 +173,49 @@ boolean setupIMU()
   Fastwire::setup(400, true);
 #endif
 
-  // initialize device
-  Serial.println(F("Initializing IMU..."));
+  if (infoON)
+  {
+    // initialize device
+    Serial.println(F("Initializing IMU..."));
+  }
   accelgyro.initialize();
-
-  // verify connection
-  Serial.println(F("Testing IMU connection..."));
 
   if (accelgyro.testConnection())
   {
-    Serial.println(F("Good!"));
+    if (infoON)
+    {
+      Serial.println(F("IMU connection good!"));
+    }
     successful = 1;
   }
   else
   {
-    Serial.println(F("Fail!"));
+    if (infoON)
+    {
+      Serial.println(F("IMU connection failed!"));
+    }
     successful = 0;
+  }
+
+  // Set defaults range of IMU. done in initilize routine but set anyway
+  // Sets acc/gyro to most sensitive settings, namely +/- 2g and +/- 250 degrees/sec, and sets the clock source to use the X Gyro for reference, which is slightly better than the default internal clock source.
+  // accelgyro.setClockSource(MPU6050_CLOCK_PLL_XGYRO);
+  // accelgyro.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
+  accelgyro.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
+
+  //@TODO-consider setting these things:
+  // accelgyro.setDLPFMode(); //dighital high pass filter
+  // turn off IMU axes not needed @TODO-test
+  // setStandbyYAccelEnabled(true);
+  // setStandbyZAccelEnabled(true);
+  // setStandbyXGyroEnabled(true); //do not put this to sleep as I think it uses this as the clock source @TODO-check
+  // setStandbyYGyroEnabled(true);
+  // setStandbyZGyroEnabled(true);
+
+  if (debug)
+  {
+    Serial.print(F("Accelerometer full scale range set to (0 = +/- 2g,  1 = +/- 4g, 2 = +/- 8g, 3 = +/- 16g):"));
+    Serial.println(accelgyro.getFullScaleAccelRange());
   }
 
   return successful;
@@ -299,7 +331,7 @@ boolean calibrateIMU()
   {
     Serial.println(F("DEBUG-before calibration, priting IMU readings."));
     Serial.println(F("time (ms),x,y,z"));
-    for (byte i = 0; i < 3; i++)
+    for (unsigned int i = 0; i < 10000; i++)
     { // max iterations for unsigned long is 4294967295
       char delim = ',';
       Serial.print(millis());
@@ -530,21 +562,31 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents, unsigned long lastMotionTim
 
   byte exitCode = 0;
 
-  long supplyV = readVcc();
-  //@TODO-is there a better way than using a garbage variable?
+  long supplyV = readVcc(); //@TODO-is this really where we want to be reading supply voltage? perhaps change to parameter we pass to it
+  //@TODO-is there a better way than using a garbage variable? CLEAN THIS UP!!
   char garbage[1];
   int lengthNeeded; // number of characters that would have been written if message had been sufficiently large, not counting the terminating null character.
-  // format specifiers:%lu for unsigned long, %ld for long, %d for integers (decimal format), %f for floating-point numbers (floating-point format), %c for characters, %s for strings
-  lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
-  char message[lengthNeeded * sizeof(char) + 1];                                                                                                                                     // normally needs ~14 characters
-  lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u,%lu", reserved, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
   if (debug)
   {
-    Serial.print(F("chars needed to write message (I added 1 for null char):"));
-    Serial.println(lengthNeeded + 1);
-    Serial.print(F("Size of message--SIZEOF() EDITION WOWWW:"));
-    Serial.println(sizeof(message));
+    messageType = 2;
+    lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu,%hu,%hu,%u,%u,%u", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime, lastMotion1, lastMotion2, motionInteruptWakupCount, motionEventOneCount, motionEventTwoCount);
   }
+  else
+  {
+    messageType = 1;
+    // format specifiers:%u for unsigned int, %hu for byte (@TODO-test)  %lu for unsigned long, %ld for long, %d for integers (decimal format), %f for floating-point numbers (floating-point format), %c for characters, %s for strings
+    lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  }
+  char message[lengthNeeded * sizeof(char) + 1];
+  if (debug)
+  {
+    lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u,%lu,%hu,%hu,%u,%u,%u", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime, lastMotion1, lastMotion2, motionInteruptWakupCount, motionEventOneCount, motionEventTwoCount);
+  }
+  else
+  {
+    lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u,%lu", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
+  }
+
   if ((unsigned long)(lengthNeeded + 1) > (sizeof(message) / sizeof(char)))
   { // truncated message alert!
     if (infoON)
@@ -572,7 +614,7 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents, unsigned long lastMotionTim
   // rf95.waitPacketSent(); //this just adds useless delay
   if (infoON)
   {
-    Serial.println(F("Packet is either being sent (& will finish soon) or is already sent."));
+    Serial.println(F("Packet send finishing soon or already sent."));
   }
 
   return exitCode;
@@ -677,7 +719,7 @@ byte sendNodeInfoRadioPacketWithACK(byte triesToAttempt, unsigned int numEvents,
   byte exitCodefromACK;
   byte triesForACK = triesToAttempt;
 
-  // my hackey attemtp to try to clear the receive buffer
+  // my hackey attempt to try to clear the receive buffer @TODO-fix this issue
   exitCodefromACK = checkForACK(0);
   if (debug)
   {
@@ -768,9 +810,6 @@ byte sendNodeInfoRadioPacketWithACK(byte triesToAttempt, unsigned int numEvents,
 
 byte checkAccelInRangeForT(int32_t upper_limit, int32_t lower_limit, uint32_t time_in_range_ms, uint32_t timeout_ms)
 {
-  // #include <stdbool.h>
-  // #include <stdint.h>
-
   // Function to check if a variable remains above a certain number or below a certain number
   // for a specified period of time.
   // Parameters:
@@ -794,32 +833,35 @@ byte checkAccelInRangeForT(int32_t upper_limit, int32_t lower_limit, uint32_t ti
   {
     int16_t totalAcc = long(accelgyro.getAccelerationX());
 
-    if ((totalAcc < upper_limit) && (totalAcc > lower_limit))
+    if ((totalAcc < upper_limit) && (totalAcc > lower_limit)) // if the value is in deadband
     {
       inRangePreviously = false;
       timeInLimit = 0;
     }
-    else if (!inRangePreviously) // If the variable is back within the range, reset the timer.
+    else if (!inRangePreviously) // If the variable just got back within the range, reset the timer.
     {
       inRangePreviously = true;
       timeInLimit = 0;
-    }
+    } // otherwise, leave the variables along
 
-    if (inRangePreviously)
+    if (inRangePreviously) // update our timer
     {
-      timeInLimit += (delay_us / 1000);
+      timeInLimit += (delay_us / 1000); //@TODO-get rid of this division here!!
       if (debug)
       {
-        Serial.print(F("in range. timeInLimit:"));
-        Serial.println(timeInLimit);
+        //Serial.print(F("timeInLimit:"));
+        //Serial.println(timeInLimit);
+        digitalWrite(LED_BUILTIN,HIGH);
+        delayMicroseconds(50);
+        digitalWrite(LED_BUILTIN,LOW);
       }
       if (timeInLimit >= time_in_range_ms)
       {
-        if (totalAcc > upper_limit)
+        if (totalAcc >= upper_limit)
         {
           return 1; // 'totalAcc' remained above 'upper_limit' for the specified time period.
         }
-        else if (totalAcc < lower_limit)
+        else if (totalAcc <= lower_limit)
         {
           return 2; // 'totalAcc' remained below 'lower_limit' for the specified time period.
         }
@@ -832,7 +874,7 @@ byte checkAccelInRangeForT(int32_t upper_limit, int32_t lower_limit, uint32_t ti
     }
     previousdelayT = micros(); // reset
     // delay(delay_us/1000));
-  }
+  } // end the while loop for the timeout
 
   return 0; // Timeout occurred, the variable did not remain above 'upper_limit' or below 'lower_limit' for the specified time period.
 }
@@ -867,8 +909,6 @@ void setup()
   Serial.println(F("Compiled with VSCode and platformIO core")); //@TODO-update this whenever compiling
   Serial.println(F("and libraries: electroniccats/MPU6050, mikem/RadioHead"));
   Serial.print(F("Elevator sensor V "));
-  Serial.print(reserved);
-  Serial.print('.');
   Serial.print(sensorType);
   Serial.print('.');
   Serial.print(firmwareVMajor);
@@ -899,7 +939,7 @@ void setup()
   }
 
   byte mode = checkJumperMode();
-  if (mode == 0 || mode == 1) // try to calibrate the IMU if we are in a mode that requests it
+  if (mode == 1) // try to calibrate the IMU if we are in a mode that requests it
   {
     if (!calibrateIMU())
     {
@@ -999,6 +1039,16 @@ void setup()
     uncorrectableError(6);
   }
 
+  //@TODO-program this value in as an interupt
+  // accelgyro.setMotionDetectionThreshold();
+  // setMotionDetectionDuration();
+  // setZeroMotionDetectionThreshold();
+  // setZeroMotionDetectionDuration();
+  // setInterruptDrive(0);//set to pulse interupt @TODO check
+  // setInterruptMode() open drain or push pull @TODO-which uses less power?
+  // setIntEnabled()//@TODO-see which interupts we should enable
+  // setIntMotionEnabled(true);
+  // setIntZeroMotionEnabled(true);
   // set the IMU interupt for the motion thesholds we either read from EEPROM or calibrated (@TODO-will set interupt in next version of program)
   // pinMode(interruptPin, INPUT_PULLUP); // Set pin 3 as an input with internal pull-up
   // attachInterrupt(digitalPinToInterrupt(interruptPin), detectRisingSignal, FALLING); @TODO-check if the IMU is RISING FALLING or what
@@ -1035,7 +1085,12 @@ void loop()
     }
     //@TODO-maybe send a packet out with an error?
   }
-  // put IMU to low power?
+  //@TODO- consider putting IMU to low power also
+  /*
+setSleepEnabled(true);
+setWakeFrequency(3);//3=sample at 10Hz, 0=sample at k1.25Hz
+setSleepEnabled(false);
+*/
   // simulate microcontroller sleeping for sleepT
   unsigned long sleepStartT = millis();
   do
@@ -1050,7 +1105,7 @@ void loop()
     int16_t totalAcc = long(accelgyro.getAccelerationX());
     if ((totalAcc > maxRawAcc) || (totalAcc < minRawAcc))
     {
-      IMUinterupt();
+      IMUinterupt(); // call ISR to set motionInteruptTriggered to true
       if (infoON)
       {
         Serial.println(F("------motion threshold triggered------"));
@@ -1070,12 +1125,14 @@ void loop()
         }
       }
     }
-    delayMicroseconds(3150);                                                            // from IMU_Zero example in MPU6050 library
+    delay(10); // save power? @TODO-add ability to set sample rate. Note that per data sheet max sample rate is 1000 Hz so faster than this is certainly wasting power
+    // delayMicroseconds(3150);// from IMU_Zero example in MPU6050 library
   } while ((!motionInteruptTriggered) && ((millis() - sleepStartT) < (sleepT * 1000))); // continue loop if we didn't trigger motion int & time elapsed is less than the sleep time
   // code will start here when wake from sleep
   if (motionInteruptTriggered)
   {
     updateAndGetSecsSinceBoot(2); // call this telling it we woke from an interrupt
+    motionInteruptWakupCount++;   //@TODO-for debug,delete
   }
   else
   {
@@ -1083,73 +1140,106 @@ void loop()
   }
 
   //********check to see if we woke up to the elevator moving or just nonsense
-  bool elevatorMoved = false;
-  if (motionInteruptTriggered)
+  bool motionEvent = false;
+  if (motionInteruptTriggered) // actually check to see if elevator is moving. @TODO-move this to a function
   {
     //@TODO-do we want to warm up radio here? "Caution: there is a time penalty as the radio takes a finite time to wake from sleep mode." (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#a6f4fef2a1f40e704055bff09799f08cf)
-    //rf95.setModeIdle();
-    // disable interupt from IMU (NOT FOR RADIO)
-    if (false)
+    // rf95.setModeIdle();
+    // disable interupt from IMU (but not interupt for radio)
+
+    //@TODO-change some to unsigned long
+    unsigned int miniumElevatorAccTime = 10; // in ms, time elevator is outside the deadband of acceleromenter (continiously), min value of all trials
+    unsigned int elevatorAccTime = 1000;     // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
+    unsigned int minTimeBetweenAcc = 50;    // in ms, time the elevator takes between acceleration and deceleration, min value of all trials
+    unsigned int maxDoorToDoorTime = 16000;  // in ms, time it takes elevator to transit from top to bottom or bottom to top (in practce this could be the max time between the end of initial acceleraton and the end of decelleraton), max value of all trials
+    byte motion1 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
+    byte motion2 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
+    if (debug)
     {
-      elevatorMoved = true; // for debug, treat all triggers as motion
+      Serial.println(F("Begin looking for motion1"));
     }
-    else // actually check to see if elevator is moving
-    {
-      unsigned int miniumElevatorAccTime = 500;   // in ms, time elevator is above deadband of acceleromenter, continiously, min value of all trials
-      unsigned int elevatorAccTime = 3000;        // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
-      unsigned int maxElevatorTravelTime = 15000; // in ms, time it takes elevator to transit, max value of all trials
-      //@TODO-get this to record the times and actual max/min values or delete these times if not used
-      unsigned long startMot1T = updateAndGetSecsSinceBoot(0);
-      if (debug)
+    //@TODO-get this to do something with the times and record actual max/min acceleraton values
+    unsigned long startMot1T = updateAndGetSecsSinceBoot(0);
+    motion1 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, elevatorAccTime);
+    lastMotion1 = motion1; //@TODO-for debug,delete
+    if (infoON)
+    { // give indicator if we sensed motion
+      if (motion1)
       {
-        Serial.println(F("Begin motion1"));
-      }
-      byte motion1 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, elevatorAccTime); // must be above or below threshold for 500 ms, timeout=3000 ms @TODO-check
-      if (infoON)
-      { // give indicator if we sensed motion
-        if (motion1)
+        motionEventOneCount++; //@TODO-for debug,delete
+        // fadeLED(motion1);//dont want to add delay in time sensitive code
+        Serial.println(F("1st acceleration or decel sensed."));
+        if (debug)
         {
-          fadeLED(motion1);
-          Serial.println(F("Elevator acceleration or decel sensed, "));
-          Serial.print(F("motion1 result:"));
+          Serial.print(F("motion1:"));
           Serial.println(motion1);
         }
-        else
-        {
-          Serial.println(F("Timeoout. No elevator motion sensed."));
-        }
       }
-      //@TODO-skip the rest if we time out on the first
-      unsigned long startMot2T = updateAndGetSecsSinceBoot(0);
-      byte motion2 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, maxElevatorTravelTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
+      else
+      {
+        Serial.println(F("Timeout. No motion sensed, skip looking for 2nd event"));
+      }
+    }
+    unsigned long startMot2T = updateAndGetSecsSinceBoot(0);
+
+    if (motion1) // if we didn't see motion1, no need to check for motion2
+    {
+      //@TODO-test minium delay between floors
+      if (debug)
+      {
+        Serial.print(F("Delaying..."));
+      }
+      delay(minTimeBetweenAcc);
+      if (debug)
+      {
+        Serial.println(F("Delay done, look for 2nd motion event"));
+      }
+
+      motion2 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, maxDoorToDoorTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
+      lastMotion2 = motion2;                                                                           //@TODO-for debug,delete
       if (infoON)
       {
         if (motion2)
         {
-          fadeLED(motion2);
-          Serial.print(F("Elevator acceleration or decel sensed, "));
-          Serial.print(F("motion2 result:"));
-          Serial.println(motion2);
+          motionEventTwoCount++; //@TODO-for debug,delete
+          // fadeLED(motion2);
+          Serial.println(F("2nd acceleration or decel sensed."));
+          if (debug)
+          {
+            Serial.print(F("motion2:"));
+            Serial.println(motion2);
+          }
         }
         else
         {
-          Serial.println(F("Timeoout. No elevator motion sensed."));
+          Serial.println(F("Timeout. No elevator motion sensed."));
         }
       }
-      unsigned long endMot2T = updateAndGetSecsSinceBoot(0);
+    }
+    unsigned long endMot2T = updateAndGetSecsSinceBoot(0);
 
-      if (motion1 * motion2 == 2)
-      { // only a up (1) and then down (2) or a down (2) then up (1) will give output of 2 here
-        elevatorMoved = true;
+    if ((motion1 == 2 && motion2 == 1) || (motion1 == 1 && motion2 == 2)) // check to see if these accelerations were in opposite directions
+    {
+      motionEvent = true;
+      if (infoON)
+      {
+        Serial.println(F("***Full elevator motion detected***"));
       }
-    } // end if(!debug) statement
+    }
 
-    motionInteruptTriggered = false; // reset
-  }                                  // end if motionInteruptTriggered
+    if (false && motionInteruptTriggered)
+    // if (debug && motionInteruptTriggered)
+    {
+      motionEvent = true; // for debug, treat all triggers as motion @TODO-delete
+    }
+    motionInteruptTriggered = false; // reset interupt flag
+    // enable interupt on IMU
+  } // end if motionInteruptTriggered
 
-  if (elevatorMoved)
+  //**********code to handle when there was a motion event
+  if (motionEvent)
   {
-    //def need to warm up radio from sleep now. "Caution: there is a time penalty as the radio takes a finite time to wake from sleep mode." (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#a6f4fef2a1f40e704055bff09799f08cf)
+    // def need to warm up radio from sleep now. "Caution: there is a time penalty as the radio takes a finite time to wake from sleep mode." (http://www.airspayce.com/mikem/arduino/RadioHead/classRH__RF95.html#a6f4fef2a1f40e704055bff09799f08cf)
     rf95.setModeIdle();
     motionLastDetectedTime = updateAndGetSecsSinceBoot(0);
     motionEvents++;
@@ -1162,14 +1252,23 @@ void loop()
     {
       motionEvents = 0; // reset these if we get an ACK
       motionLastDetectedTime = 0;
+
+      if (debug)
+      {
+        motionInteruptWakupCount = 0;
+        lastMotion1 = 0;
+        lastMotion2 = 0;
+        motionEventOneCount = 0;
+        motionEventTwoCount = 0;
+      }
     }
-
-    elevatorMoved = false; // reset
   }
-  // enable interupt on IMU
 
-  //*****do stuff at certain time intervals.
-  // check the jumpers to see if mode changed. consumes power to set pullup resistors so limit this.
+  //*************code to do stuff at certain time intervals***********************
+  //@TODO-consider putting battery read and other sensor read code here
+  // accelgyro.SetTempSensorEnabled(bool enabled);
+  // accelgyro.getTemperature(); //@TODO-useful to send temperature info, could average with ATMEGA328
+  //*****check the jumpers to see if mode changed. consumes power to set pullup resistors so limit this.
   static unsigned long prevCheckModeT = updateAndGetSecsSinceBoot(0);
   if ((updateAndGetSecsSinceBoot(0) - prevCheckModeT) > 60)
   {
@@ -1180,15 +1279,34 @@ void loop()
     checkJumperMode();
     prevCheckModeT = updateAndGetSecsSinceBoot(0); // Reset the timer
   }
-  // send a radio status message if its been long enough
+  //******* send a radio status message if its been long enough, and there wasn't just a motion event
   static unsigned long prevSendInfoT = updateAndGetSecsSinceBoot(0);
-  static unsigned int sendInfoIntervalT = 3600;                           // send the first info packet after an hour
-  if ((updateAndGetSecsSinceBoot(0) - prevSendInfoT) > sendInfoIntervalT) // send a radio packet at a defined interval, with some randomness introduced
+  static unsigned int sendInfoIntervalT = 3600;                                             // send the first info packet after an hour
+  if (((updateAndGetSecsSinceBoot(0) - prevSendInfoT) > sendInfoIntervalT) && !motionEvent) // send a radio packet at a defined interval, with some randomness introduced
   {
-    if (sendNodeInfoRadioPacketWithACK(1, motionEvents, motionLastDetectedTime) == 0) // try to send 1 time @TODO-determine best behavior for this
+
+    unsigned long timeToSend;
+    if (motionEvents == 0)
+    { // just send the time the node thinks it is now if we have no motion events to send
+      timeToSend = updateAndGetSecsSinceBoot(0);
+    }
+    else
+    {
+      timeToSend = motionLastDetectedTime;
+    }
+    if (sendNodeInfoRadioPacketWithACK(2, motionEvents, timeToSend) == 0) // try to send info packet 2 times @TODO-determine better behavior for this
     {
       motionEvents = 0; // reset these if we get an ACK
       motionLastDetectedTime = 0;
+
+      if (debug)
+      {
+        motionInteruptWakupCount = 0;
+        lastMotion1 = 0;
+        lastMotion2 = 0;
+        motionEventOneCount = 0;
+        motionEventTwoCount = 0;
+      }
     }
 
     prevSendInfoT = updateAndGetSecsSinceBoot(0);    // Reset the timer, not precise
@@ -1197,9 +1315,11 @@ void loop()
     {
       Serial.print(F("Sending a info packet. Would be new semi-random interval to wait (but debug mode forces 60s):"));
       Serial.println(sendInfoIntervalT);
-      sendInfoIntervalT = 60; // force this to send every min
+      sendInfoIntervalT = 3600; // force this to send every min
     }
   }
 
+  //************Code before we go to sleep**********
+  motionEvent = false;          // reset elevator flag
   updateAndGetSecsSinceBoot(0); // update before we go to sleep
 } // end loop
