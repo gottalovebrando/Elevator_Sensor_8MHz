@@ -919,23 +919,6 @@ void setup()
     uncorrectableError(1);
   }
 
-  if (debug)
-  {
-    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
-    Serial.println(F("time (ms),x,y,z"));
-    for (unsigned int i = 0; i < 10000; i++)
-    { // max iterations for unsigned long is 4294967295
-      char delim = ',';
-      Serial.print(millis());
-      Serial.print(delim);
-      Serial.print(accelgyro.getAccelerationX());
-      Serial.print(delim);
-      Serial.print(accelgyro.getAccelerationY());
-      Serial.print(delim);
-      Serial.println(accelgyro.getAccelerationZ());
-    }
-  }
-
   if (!setupRadio())
   {
     uncorrectableError(2);
@@ -1055,6 +1038,24 @@ void setup()
   // set the IMU interupt for the motion thesholds we either read from EEPROM or calibrated (@TODO-will set interupt in next version of program)
   // pinMode(interruptPin, INPUT_PULLUP); // Set pin 3 as an input with internal pull-up
   // attachInterrupt(digitalPinToInterrupt(interruptPin), detectRisingSignal, FALLING); @TODO-check if the IMU is RISING FALLING or what
+
+
+  if (debug)
+  {
+    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
+    Serial.println(F("time (ms),x,y,z"));
+    for (unsigned int i = 0; i < 10000; i++)
+    { // max iterations for unsigned long is 4294967295
+      char delim = ',';
+      Serial.print(millis());
+      Serial.print(delim);
+      Serial.print(accelgyro.getAccelerationX());
+      Serial.print(delim);
+      Serial.print(accelgyro.getAccelerationY());
+      Serial.print(delim);
+      Serial.println(accelgyro.getAccelerationZ());
+    }
+  }
 
   // setup should take such a variable amount of time, this should be good
   randSeed = micros() + random(); // unsigned long
