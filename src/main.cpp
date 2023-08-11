@@ -376,7 +376,7 @@ boolean calibrateIMU()
     delayMicroseconds(3150); // from IMU_Zero example in MPU6050 library
   }
   // add or subtract a set value for a safety margin. A 11 hour test (on x and z directions, 2 different IMUs) showed that the min and max values were mostly determined within 1.7 mis but that adding 264 to each was enouugh to get the max or min discovered within all 11 hours.
-  maxRawAcc = maxRawAcc + 550;
+  maxRawAcc = maxRawAcc + 550    ;
   minRawAcc = minRawAcc - 550;
   if (infoON)
   {
@@ -879,6 +879,7 @@ void setup()
    * Version history:
    * V1.0-initial
    * V1.1-major revisions to packet structure
+   * V1.2-changes to timings, threshold and some algorithmic changes to get it to WORK (Note-some early tests show V1.1)
    *
    * @TODO:
    * allow changing of nodeID somehow (serial or from radio?)
@@ -886,7 +887,7 @@ void setup()
    * switch all methods to return exit codes instead of boolean
    */
   firmwareVMajor = 1;
-  firmwareVMinor = 1;
+  firmwareVMinor = 2;
 
   Serial.begin(baudRate);
   Serial.println();
@@ -1054,6 +1055,7 @@ void setup()
       Serial.print(accelgyro.getAccelerationY());
       Serial.print(delim);
       Serial.println(accelgyro.getAccelerationZ());
+      delay(1);
     }
   }
 
@@ -1152,9 +1154,9 @@ setSleepEnabled(false);
     // disable interupt from IMU (but not interupt for radio)
 
     //@TODO-change some to unsigned long
-    unsigned int miniumElevatorAccTime = 10; // in ms, time elevator is outside the deadband of acceleromenter (continiously), min value of all trials
-    unsigned int elevatorAccTime = 1000;     // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
-    unsigned int minTimeBetweenAcc = 50;     // in ms, time the elevator takes between acceleration and deceleration, min value of all trials
+    unsigned int miniumElevatorAccTime = 550; // in ms, time elevator is outside the deadband of acceleromenter (continiously), min value of all trials
+    unsigned int elevatorAccTime = 2000;     // in ms, time the elevator takes to finish its initial acceleration, max value of all trials
+    unsigned int minTimeBetweenAcc = 700;     // in ms, time the elevator takes between acceleration and deceleration, min value of all trials
     unsigned int maxDoorToDoorTime = 16000;  // in ms, time it takes elevator to transit from top to bottom or bottom to top (in practce this could be the max time between the end of initial acceleraton and the end of decelleraton), max value of all trials
     byte motion1 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
     byte motion2 = 0;                        // set to 1 (one directio) or 2 (other direction) if out of deadband for miniumElevatorAccTime
@@ -1164,7 +1166,7 @@ setSleepEnabled(false);
     }
     //@TODO-get this to do something with the times and record actual max/min acceleraton values
     unsigned long startMot1T = updateAndGetSecsSinceBoot(0);
-    motion1 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, elevatorAccTime);
+    motion1 = checkAccelInRangeForT((maxRawAcc-550), (minRawAcc+910), miniumElevatorAccTime, elevatorAccTime);
     lastMotion1 = motion1; //@TODO-for debug,delete
     if (infoON)
     { // give indicator if we sensed motion
@@ -1199,7 +1201,7 @@ setSleepEnabled(false);
         Serial.println(F("Delay done, look for 2nd motion event"));
       }
 
-      motion2 = checkAccelInRangeForT(maxRawAcc, minRawAcc, miniumElevatorAccTime, maxDoorToDoorTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
+      motion2 = checkAccelInRangeForT((maxRawAcc-550), (minRawAcc+550), miniumElevatorAccTime, maxDoorToDoorTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
       lastMotion2 = motion2;                                                                           //@TODO-for debug,delete
       if (infoON)
       {
