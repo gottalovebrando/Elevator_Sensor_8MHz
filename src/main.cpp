@@ -1319,10 +1319,9 @@ setSleepEnabled(false);
     sendInfoIntervalT = 21600 + random(-3600, 3600); // set a new random time to wait. 21600 is 4 times a day (6 hours)
     if (debug)
     {
-      Serial.print(F("Sending a info packet. Would be new semi-random interval to wait (but debug mode forces 60s):"));
+      Serial.print(F("Sending a info packet. Would be new semi-random interval to wait (but debug mode forces 3600s):"));
       Serial.println(sendInfoIntervalT);
-      sendInfoIntervalT = 3600; // force this to send every min
-    }
+      sendInfoIntervalT = 3600; // force this to send this interval if debug is on
   }
 
   //************Code before we go to sleep**********
