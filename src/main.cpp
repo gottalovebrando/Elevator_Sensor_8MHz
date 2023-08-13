@@ -551,7 +551,7 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents, unsigned long lastMotionTim
   //@TODO-is there a better way than using a garbage variable? CLEAN THIS UP!!
   char garbage[1];
   int lengthNeeded; // number of characters that would have been written if message had been sufficiently large, not counting the terminating null character.
-  if (debug)
+  if (debug && false)
   {
     messageType = 2;
     lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu,%hu,%hu,%u,%u,%u", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime, lastMotion1, lastMotion2, motionInteruptWakupCount, motionEventOneCount, motionEventTwoCount);
@@ -563,7 +563,7 @@ byte sendNodeInfoRadioPacket(unsigned int numEvents, unsigned long lastMotionTim
     lengthNeeded = snprintf(garbage, sizeof(garbage), "%u.%u.%u.%u,%lu,%ld,%u,%lu", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime); // A terminating null character is automatically appended after the content written. https://cplusplus.com/reference/cstdio/snprintf/
   }
   char message[lengthNeeded * sizeof(char) + 1];
-  if (debug)
+  if (debug && false) //@TODO-figure this debug message out
   {
     lengthNeeded = snprintf(message, sizeof(message), "%u.%u.%u.%u,%lu,%ld,%u,%lu,%hu,%hu,%u,%u,%u", messageType, sensorType, firmwareVMajor, firmwareVMinor, nodeID, supplyV, numEvents, lastMotionTime, lastMotion1, lastMotion2, motionInteruptWakupCount, motionEventOneCount, motionEventTwoCount);
   }
@@ -1201,7 +1201,7 @@ setSleepEnabled(false);
         Serial.println(F("Delay done, look for 2nd motion event"));
       }
 
-      motion2 = checkAccelInRangeForT((maxRawAcc-550), (minRawAcc+550), miniumElevatorAccTime, maxDoorToDoorTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
+      motion2 = checkAccelInRangeForT((maxRawAcc-910), (minRawAcc+550), miniumElevatorAccTime, maxDoorToDoorTime); // must be above or below threshold for 500 ms, timeout=15 seconds @TODO-check
       lastMotion2 = motion2;                                                                           //@TODO-for debug,delete
       if (infoON)
       {
@@ -1322,6 +1322,7 @@ setSleepEnabled(false);
       Serial.print(F("Sending a info packet. Would be new semi-random interval to wait (but debug mode forces 3600s):"));
       Serial.println(sendInfoIntervalT);
       sendInfoIntervalT = 3600; // force this to send this interval if debug is on
+  }
   }
 
   //************Code before we go to sleep**********
