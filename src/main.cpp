@@ -34,7 +34,7 @@ int16_t minRawAcc;
 // #include <SPI.h> //SPI used by lora and flash chip
 #define RFM95_CS 10                      // chip select for SPI
 #define RFM95_INT 2                      // interupt pin
-unsigned long nodeID = 5;                // up to 2 million for lorawan?
+unsigned long nodeID = 6;                // up to 2 million for lorawan?
 const boolean forceChangeNodeID = false; // if you want to force the IMU to write this hard coded nodeID to EEPROM and use it. Only needed if you need to change it after it has been programmed
 float frequency = 904.0;                 // Specify the desired frequency in MHz
 // the transmit power in dB. -4 to 20 in 1 dB steps. NOTE-function itself seems to indicate a range of 2-20 dB or 0-15 dB @TODO-research
@@ -340,6 +340,7 @@ boolean calibrateIMU()
   minRawAcc = totalAcc;
   maxRawAcc = totalAcc;
   unsigned long calibrationT = 102000;
+  //unsigned long calibrationT = 39600000;//11 hours for debugging
   /*
   if (debug && false)
   {
@@ -349,14 +350,13 @@ boolean calibrateIMU()
   */
   while ((millis() - startT) < calibrationT) // collect max and min for 1.7 mins (102000 ms)
   {
-    // totalAcc = abs(long(accelgyro.getAccelerationX())) + abs(long(accelgyro.getAccelerationY())) + abs(long(accelgyro.getAccelerationZ()));
     totalAcc = accelgyro.getAccelerationX();
     if (minRawAcc > totalAcc)
     {
       minRawAcc = totalAcc;
       if (debug)
       {
-        Serial.print(F("Tim (ms) elapsed:"));
+        Serial.print(F("Time (ms) elapsed:"));
         Serial.print(millis() - startT);
         Serial.print(F(" New min:"));
         Serial.println(totalAcc);
@@ -926,7 +926,7 @@ void setup()
   }
 
   byte mode = checkJumperMode();
-  if (mode == 1) // try to calibrate the IMU if we are in a mode that requests it
+  if (mode == 1 || mode == 0) // try to calibrate the IMU if we are in a mode that requests it
   {
     if (!calibrateIMU())
     {
@@ -1043,9 +1043,9 @@ void setup()
 
   if (debug)
   {
-    Serial.println(F("DEBUG-before calibration, priting IMU readings."));
+    Serial.println(F("DEBUG-priting IMU readings..."));
     Serial.println(F("time (ms),x,y,z"));
-    for (unsigned int i = 0; i < 10000; i++)
+    for (unsigned int i = 0; i < 20; i++)
     { // max iterations for unsigned long is 4294967295
       char delim = ',';
       Serial.print(millis());
@@ -1233,10 +1233,11 @@ setSleepEnabled(false);
       }
     }
 
-    if (false && motionInteruptTriggered)
-    // if (debug && motionInteruptTriggered)
+    //if (false && motionInteruptTriggered)
+    if (debug && motionInteruptTriggered)
     {
-      motionEvent = true; // for debug, treat all triggers as motion @TODO-delete
+      motionEvent = true; // for debug, treat all triggers as motion
+      Serial.println(F("DEBUG-***Full elevator motion forced to be detected***"));
     }
     motionInteruptTriggered = false; // reset interupt flag
     // enable interupt on IMU
